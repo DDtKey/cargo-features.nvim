@@ -1,0 +1,10 @@
+.DS_Store
+.nvimlog
+tags
+.luarc.json
+.tmp/
+.deps/
+examples/rust-workspace/Cargo.lock
+examples/rust-workspace/target/
+tests/fixtures/**/Cargo.lock
+tests/fixtures/**/target/

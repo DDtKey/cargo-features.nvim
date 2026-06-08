@@ -1,0 +1,11 @@
+[package]
+name = "simple"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["serde"]
+metrics = []
+serde = []
+"quoted-feature" = []
+tokio = []

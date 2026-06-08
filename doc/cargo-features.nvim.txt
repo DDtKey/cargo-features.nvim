@@ -1,0 +1,261 @@
+*cargo-features.nvim.txt* Native Cargo feature UI for rust-analyzer
+
+==============================================================================
+INTRODUCTION                                      *cargo-features.nvim*
+
+cargo-features.nvim provides a dependency-free floating window for toggling
+Cargo features and applying them to active rust-analyzer LSP clients.
+
+Requirements:
+- Neovim 0.10+
+- An already-running rust-analyzer client
+- Optional cargo executable for best feature discovery
+
+Client detection:
+  The plugin recognizes the canonical `rust-analyzer` client name, the
+  `rust_analyzer` compatibility alias, and custom-named clients launched with
+  the `rust-analyzer` executable.
+
+==============================================================================
+COMMANDS                                      *cargo-features-commands*
+
+:CargoFeatures
+    Open the Cargo feature manager for the nearest Cargo.toml.
+
+:CargoFeaturesDebug
+    Print active rust-analyzer clients, attachment state, roots, workspace
+    folders, and whether each client covers the current Cargo manifest.
+
+==============================================================================
+LUA API                                          *cargo-features-api*
+
+require("cargo-features").setup({opts})          *cargo-features.setup()*
+    Configure the plugin.
+
+require("cargo-features").open()                 *cargo-features.open()*
+    Open the floating UI.
+
+require("cargo-features").apply({features}, {opts})   *cargo-features.apply()*
+    Apply a list of feature names to matching rust-analyzer clients. Pass a
+    bufnr or manifest_path in opts to avoid global ambiguity.
+
+    opts:
+      bufnr                       Buffer used to find attached clients.
+      manifest_path               Cargo.toml path used to scope clients.
+      has_default                 Whether default feature state is managed.
+      default_enabled             Desired default feature state.
+      scope                       "package" or "workspace".
+      remember                    Store the selection for in-session reapply.
+                                  UI apply passes this explicitly.
+      allow_global                Apply to all rust-analyzer clients only when
+                                  explicitly true.
+      allow_all_features_token    Allow cargo.features = "all" when config,
+                                  scope, and all_enabled also permit it.
+
+require("cargo-features").save_profile({name}, {opts})   *cargo-features.save_profile()*
+    Experimental pre-1.0 helper. Save a named profile when persistence.enabled
+    is true. opts.manifest_path is required. opts.features, default_enabled,
+    scope, workspace_root, and package_name are stored when provided.
+
+require("cargo-features").load_profile({name}, {opts})   *cargo-features.load_profile()*
+    Experimental pre-1.0 helper. Load a named profile for a manifest/workspace
+    key.
+
+require("cargo-features").delete_profile({name}, {opts}) *cargo-features.delete_profile()*
+    Experimental pre-1.0 helper. Delete a named profile for a
+    manifest/workspace key.
+
+require("cargo-features").list_profiles({opts})          *cargo-features.list_profiles()*
+    Experimental pre-1.0 helper. Return sorted profile names for a
+    manifest/workspace key.
+
+    Profile keys:
+      Package profiles use opts.manifest_path.
+      Workspace profiles use opts.workspace_root when scope = "workspace".
+      save_profile() still requires opts.manifest_path so the stored profile
+      contains the Cargo.toml it came from.
+
+==============================================================================
+DEFAULT CONFIG                                *cargo-features-config*
+>
+require("cargo-features").setup({
+  cargo = {
+    use_metadata = true,
+    metadata_timeout = 3000,
+    metadata_extra_args = {},
+    metadata_env = {},
+    metadata_cwd = nil,
+  },
+  lsp = {
+    notify = true,
+    reapply_policy = "if_empty",
+    sync_check_features = "if_set",
+    use_all_features_token = false,
+  },
+  persistence = {
+    enabled = false,
+    default_profile = "default",
+    auto_save = false,
+    auto_load = "never",
+  },
+  ui = {
+    ascii_icons = false,
+    border = "rounded",
+    height = 18,
+    title = "Cargo Features",
+    width = 60,
+    icons = {
+      checked = "☑",
+      unchecked = "☐",
+      ascii_checked = "[x]",
+      ascii_unchecked = "[ ]",
+    },
+    keymaps = {
+      toggle = { "<CR>", " " },
+      toggle_all = "A",
+      apply = "W",
+      close = { "q", "<Esc>" },
+    },
+  },
+})
+<
+
+Cargo options:
+  use_metadata
+      Prefer async `cargo metadata --no-deps` for feature discovery.
+
+  metadata_timeout
+      Timeout in milliseconds before falling back to simple TOML parsing.
+
+  metadata_extra_args, metadata_env, metadata_cwd
+      Escape hatches for projects that need non-default Cargo invocation.
+
+LSP options:
+  reapply_policy
+      "if_empty" by default. Controls automatic in-memory reapply when a
+      rust-analyzer client attaches:
+        "never"    Do not automatically reapply remembered plugin state.
+        "if_empty" Reapply only when the client has no explicit Cargo feature
+                   settings.
+        "always"   Reapply remembered plugin state even over explicit settings.
+
+  sync_check_features
+      "if_set" preserves rust-analyzer's inheritance by only updating
+      rust-analyzer.check.features when the user already configured it.
+
+  use_all_features_token
+      Disabled by default. `cargo.features = "all"` is workspace-wide and is
+      not equivalent to enabling every visible package feature checkbox.
+
+Persistence options:
+  enabled
+      Enables disk persistence under stdpath("state").
+
+  default_profile
+      Profile name used by the UI until named profile UI exists.
+
+  auto_save
+      Save the default profile when applying from the UI.
+
+  auto_load
+      "never" by default. Controls profile preselection on UI open:
+        "never"        Never preselect from profiles.
+        "if_no_client" Load the default profile only when no matching
+                       rust-analyzer client is available.
+        "always"       Load the default profile even when rust-analyzer has
+                       current feature state.
+
+Runtime behavior:
+  Applying features mutates live rust-analyzer settings and sends
+  workspace/didChangeConfiguration. UI apply also stores the selection in
+  memory and reapplies it when a matching rust-analyzer client attaches later
+  in the same Neovim session. Lua callers should pass remember = true when they
+  want this behavior.
+
+  Live rust-analyzer settings are the source of truth while a client is
+  attached. In-memory state is only restart/LspAttach recovery.
+  lsp.reapply_policy controls whether remembered plugin state may overwrite
+  explicit rust-analyzer Cargo feature config. The default is conservative:
+  "if_empty".
+
+  Reapply groups remembered selections by Cargo workspace. If one
+  rust-analyzer client appears to cover multiple unrelated Cargo workspaces,
+  automatic reapply is skipped instead of sending a mixed cargo.features list.
+
+  Buffer-attached rust-analyzer clients are trusted first. Root/workspace
+  matching is used to choose between clients when possible, and as the fallback
+  when no rust-analyzer client is attached to the current buffer.
+
+  cargo.noDefaultFeatures is workspace-global. Package-local default feature
+  toggling is intentionally not modeled for workspace member contexts. If
+  remembered default states ever conflict inside one workspace, reapply keeps
+  defaults enabled when any remembered entry enables them.
+
+  Disk persistence uses a versioned named-profile file:
+>
+  {
+    "version": 1,
+    "profiles": {
+      "/abs/workspace-or-manifest-key": {
+        "default": {
+          "features": ["serde"],
+          "default_enabled": true,
+          "scope": "package",
+          "manifest_path": "/abs/path/Cargo.toml",
+          "workspace_root": "/abs/workspace",
+          "package_name": "my-crate"
+        }
+      }
+    }
+  }
+<
+
+  Live apply can be checked locally with `just validate-ra`, which prints the
+  rust-analyzer version it used.
+
+  Profile auto-load follows the same source-of-truth rule: live rust-analyzer
+  settings win by default. A profile overrides live settings only with
+  persistence.auto_load = "always"; "if_no_client" is the safe fallback mode.
+
+UI options:
+  ascii_icons
+      Force [x] / [ ] icons. ASCII icons are also used automatically when
+      'ambiwidth' is "double".
+
+==============================================================================
+HIGHLIGHTS                                  *cargo-features-highlights*
+
+CargoFeaturesTitle      Linked to Title
+CargoFeaturesEnabled    Linked to DiagnosticOk
+CargoFeaturesDisabled   Linked to Comment
+CargoFeaturesSelection  Linked to CursorLine
+CargoFeaturesBorder     Linked to FloatBorder
+CargoFeaturesHelp       Linked to Comment
+CargoFeaturesError      Linked to DiagnosticError
+
+All highlight groups are created with default=true and can be overridden by
+the user or colorscheme. Explicit setup({ highlights = ... }) values override
+the eager defaults created from plugin/cargo-features.lua.
+
+==============================================================================
+LIMITATIONS                                  *cargo-features-limitations*
+
+The current workspace behavior is most precise from a concrete package
+manifest. Virtual workspace roots show package-qualified non-default features,
+but package default features are not displayed as ordinary checkboxes because
+rust-analyzer's cargo.noDefaultFeatures setting is workspace-global.
+
+When a package manifest belongs to a larger workspace, feature names are sent
+to rust-analyzer as package-qualified strings such as `my_crate/serde`.
+
+The fallback TOML scanner is intentionally small. It extracts simple local
+[features] keys only; `cargo metadata` is the source of truth whenever it is
+available.
+
+In-memory reapply matches clients by whether their root/workspace folders cover
+the stored Cargo manifest path. Ambiguous multi-root layouts that cover multiple
+remembered Cargo workspaces are skipped automatically and reported with a
+warning. Open the command from a buffer attached to the intended rust-analyzer
+client when roots are unusual.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

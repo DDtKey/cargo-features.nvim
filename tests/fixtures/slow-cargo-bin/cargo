@@ -1,0 +1,5 @@
+#!/bin/sh
+# Test fixture: shadows `cargo` on PATH so cargo metadata timeout handling is
+# deterministic and does not depend on the real Cargo process being slow.
+sleep 2
+exit 1
