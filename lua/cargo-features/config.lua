@@ -15,17 +15,13 @@ local M = {}
 ---@field metadata_cwd string? Working directory for `cargo metadata`.
 
 ---@class CargoFeaturesLspConfig
----@field notify boolean Send workspace/didChangeConfiguration after updating client settings.
----@field reapply_policy "never"|"if_empty"|"always" Control automatic restart/LspAttach recovery.
----@field refresh_after_apply boolean Request semantic-token refresh for loaded Rust buffers attached to updated clients.
----@field sync_check_features "never"|"if_set"|"always" Keep rust-analyzer.check.* aligned.
----@field use_all_features_token boolean Use cargo.features = "all" only for explicitly workspace-scoped apply calls.
+---@field reapply boolean Reapply remembered session-local settings to new rust-analyzer clients when safe.
 
 ---@class CargoFeaturesPersistenceConfig
----@field enabled boolean Persist named profiles under stdpath("state").
----@field default_profile string Profile name used by the UI until profile UX exists.
----@field auto_save boolean Save the default profile when applying from the UI.
----@field auto_load "never"|"if_no_client"|"always"|boolean Load the default profile when opening the UI.
+---@field default_profile string Profile used for automatic save/load and the UI save prompt default.
+---@field save_on_apply boolean Save the default profile when applying from the UI.
+---@field load_on_open "never"|"if_no_client"|"always"|boolean Load the default profile when opening the UI.
+---@field apply_on_attach boolean Apply the default profile to rust-analyzer clients on attach when safe.
 
 ---@class CargoFeaturesUiConfig
 ---@field ascii_icons boolean Force ASCII checkbox icons.
@@ -54,17 +50,13 @@ M.defaults = {
     CargoFeaturesError = "DiagnosticError",
   },
   lsp = {
-    notify = true,
-    reapply_policy = "if_empty",
-    refresh_after_apply = true,
-    sync_check_features = "if_set",
-    use_all_features_token = false,
+    reapply = true,
   },
   persistence = {
-    enabled = false,
     default_profile = "default",
-    auto_save = false,
-    auto_load = "never",
+    save_on_apply = false,
+    load_on_open = "never",
+    apply_on_attach = false,
   },
   ui = {
     ascii_icons = false,
@@ -81,6 +73,7 @@ M.defaults = {
       toggle_all = "A",
       apply = "W",
       reset = "R",
+      save_profile = "S",
       close = { "q", "<Esc>" },
     },
     title = "Cargo Features",
@@ -96,20 +89,35 @@ M.options = vim.deepcopy(M.defaults)
 function M.setup(opts)
   M.options = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts or {})
 
-  local reapply_policy = M.options.lsp.reapply_policy
-  if reapply_policy ~= "never" and reapply_policy ~= "if_empty" and reapply_policy ~= "always" then
-    M.options.lsp.reapply_policy = "if_empty"
+  M.options.lsp = {
+    reapply = M.options.lsp.reapply ~= false,
+  }
+
+  local persistence_opts = type(opts) == "table" and type(opts.persistence) == "table" and opts.persistence or {}
+  if persistence_opts.auto_save ~= nil and persistence_opts.save_on_apply == nil then
+    M.options.persistence.save_on_apply = persistence_opts.auto_save == true
+  end
+  if persistence_opts.auto_load ~= nil and persistence_opts.load_on_open == nil then
+    M.options.persistence.load_on_open = persistence_opts.auto_load
+  end
+  M.options.persistence.auto_save = nil
+  M.options.persistence.auto_load = nil
+
+  if type(M.options.persistence.save_on_apply) ~= "boolean" then
+    M.options.persistence.save_on_apply = false
+  end
+  if type(M.options.persistence.apply_on_attach) ~= "boolean" then
+    M.options.persistence.apply_on_attach = false
   end
 
-  if type(M.options.lsp.refresh_after_apply) ~= "boolean" then
-    M.options.lsp.refresh_after_apply = true
-  end
-
-  local auto_load = M.options.persistence.auto_load
-  if auto_load == true then
-    M.options.persistence.auto_load = "always"
-  elseif auto_load == false or (auto_load ~= "never" and auto_load ~= "if_no_client" and auto_load ~= "always") then
-    M.options.persistence.auto_load = "never"
+  local load_on_open = M.options.persistence.load_on_open
+  if load_on_open == true then
+    M.options.persistence.load_on_open = "always"
+  elseif
+    load_on_open == false
+    or (load_on_open ~= "never" and load_on_open ~= "if_no_client" and load_on_open ~= "always")
+  then
+    M.options.persistence.load_on_open = "never"
   end
 
   return M.options

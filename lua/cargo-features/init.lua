@@ -2,6 +2,43 @@ local config = require("cargo-features.config")
 
 local M = {}
 
+---@param opts? table
+---@return table?
+---@return string?
+local function resolve_context(opts)
+  opts = opts or {}
+  local cargo = require("cargo-features.cargo")
+  local bufnr = opts.bufnr or vim.api.nvim_get_current_buf()
+  local manifest_path = opts.manifest_path
+  if not manifest_path then
+    manifest_path = cargo.find_manifest(bufnr)
+  end
+  if not manifest_path then
+    return nil, "No Cargo.toml found above the current buffer"
+  end
+
+  local context = vim.tbl_extend("force", opts, {
+    bufnr = bufnr,
+    manifest_path = manifest_path,
+  })
+  if not context.workspace_root or not context.scope or not context.package_name then
+    local manifest = cargo.load_manifest(manifest_path)
+    if manifest then
+      context.workspace_root = context.workspace_root or manifest.workspace_root
+      context.package_name = context.package_name or manifest.package_name
+      context.scope = context.scope or manifest.scope
+    end
+  end
+  return context, nil
+end
+
+---@param opts? table
+---@return table?
+---@return string?
+function M._resolve_context(opts)
+  return resolve_context(opts)
+end
+
 ---@param opts? CargoFeaturesConfig
 function M.setup(opts)
   config.setup(opts)
@@ -18,30 +55,39 @@ end
 
 ---@param opts? CargoFeaturesResetOptions
 function M.reset(opts)
-  opts = opts or {}
-  local cargo = require("cargo-features.cargo")
-  local bufnr = opts.bufnr or vim.api.nvim_get_current_buf()
-  local manifest_path = opts.manifest_path
-  if not manifest_path then
-    manifest_path = cargo.find_manifest(bufnr)
-  end
-  if not manifest_path then
-    return false, "No Cargo.toml found above the current buffer"
-  end
-
-  local reset_opts = vim.tbl_extend("force", opts, {
-    bufnr = bufnr,
-    manifest_path = manifest_path,
-  })
-  if not reset_opts.workspace_root or not reset_opts.scope then
-    local manifest = cargo.load_manifest(manifest_path)
-    if manifest then
-      reset_opts.workspace_root = reset_opts.workspace_root or manifest.workspace_root
-      reset_opts.package_name = reset_opts.package_name or manifest.package_name
-      reset_opts.scope = reset_opts.scope or manifest.scope
-    end
+  local reset_opts, err = resolve_context(opts)
+  if not reset_opts then
+    return false, err
   end
   return require("cargo-features.lsp").reset(reset_opts)
+end
+
+---@param name? string
+---@param opts? table
+---@return boolean ok
+---@return string? err
+function M.apply_profile(name, opts)
+  local apply_opts, err = resolve_context(opts)
+  if not apply_opts then
+    return false, err
+  end
+
+  local profile_name = type(name) == "string" and name ~= "" and name or config.get().persistence.default_profile
+  local profile = require("cargo-features.profile_store").load_profile(profile_name, apply_opts)
+  if not profile then
+    return false, ("Profile not found: %s"):format(profile_name)
+  end
+
+  apply_opts = vim.tbl_extend("force", apply_opts, {
+    default_enabled = profile.default_enabled,
+    has_default = profile.default_enabled ~= nil,
+    package_name = profile.package_name or apply_opts.package_name,
+    scope = profile.scope or apply_opts.scope,
+    workspace_root = profile.workspace_root or apply_opts.workspace_root,
+    remember = true,
+  })
+
+  return require("cargo-features.lsp").apply(profile.features or {}, apply_opts)
 end
 
 ---@param features string[]

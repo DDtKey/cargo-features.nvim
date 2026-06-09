@@ -13,7 +13,6 @@ jobs:
       fail-fast: false
       matrix:
         neovim:
-          - v0.10.0
           - stable
     steps:
       - uses: actions/checkout@v4

@@ -135,6 +135,7 @@ local function help_lines(width)
     { key_label(keymaps.toggle_all), "All" },
     { key_label(keymaps.apply), "Apply" },
     { key_label(keymaps.reset), "Reset" },
+    { key_label(keymaps.save_profile), "Save profile" },
     { key_label(keymaps.close), "Close" },
   }
 
@@ -181,9 +182,9 @@ local function initial_enabled(manifest, bufnr)
 
   local persistence = config.get().persistence
   local profile = nil
-  local should_load_profile = persistence.auto_load == "always"
-    or (persistence.auto_load == "if_no_client" and not has_client)
-  if persistence.enabled and should_load_profile then
+  local should_load_profile = persistence.load_on_open == "always"
+    or (persistence.load_on_open == "if_no_client" and not has_client)
+  if should_load_profile then
     profile = profiles.load_profile(persistence.default_profile, {
       manifest_path = manifest.manifest_path,
       workspace_root = manifest.workspace_root,
@@ -312,7 +313,10 @@ local function toggle_all(view)
 end
 
 ---@param view CargoFeaturesView
-local function apply(view)
+---@return string[]
+---@return boolean all_enabled
+---@return boolean has_default
+local function selected_features(view)
   local selected = {}
   local all_enabled = #view.features > 0
   local has_default = false
@@ -329,6 +333,29 @@ local function apply(view)
     end
   end
 
+  return selected, all_enabled, has_default
+end
+
+---@param view CargoFeaturesView
+---@param name string?
+---@return boolean ok
+---@return string? err
+local function save_profile(view, name)
+  local selected = selected_features(view)
+  return profiles.save_profile(name, {
+    features = selected,
+    default_enabled = view.default_enabled,
+    scope = view.manifest.scope,
+    manifest_path = view.manifest.manifest_path,
+    workspace_root = view.manifest.workspace_root,
+    package_name = view.manifest.package_name,
+  })
+end
+
+---@param view CargoFeaturesView
+local function apply(view)
+  local selected, all_enabled, has_default = selected_features(view)
+
   local ok, err = lsp.apply(selected, {
     bufnr = view.source_bufnr,
     manifest_path = view.manifest.manifest_path,
@@ -338,7 +365,6 @@ local function apply(view)
     default_enabled = view.default_enabled,
     all_enabled = all_enabled,
     scope = view.manifest.scope,
-    allow_all_features_token = config.get().lsp.use_all_features_token,
     remember = true,
   })
   if not ok then
@@ -347,15 +373,8 @@ local function apply(view)
   end
 
   local persistence = config.get().persistence
-  if persistence.enabled and persistence.auto_save then
-    local saved, save_err = profiles.save_profile(persistence.default_profile, {
-      features = selected,
-      default_enabled = view.default_enabled,
-      scope = view.manifest.scope,
-      manifest_path = view.manifest.manifest_path,
-      workspace_root = view.manifest.workspace_root,
-      package_name = view.manifest.package_name,
-    })
+  if persistence.save_on_apply then
+    local saved, save_err = save_profile(view, persistence.default_profile)
     if not saved then
       util.notify(save_err or "Unable to save Cargo feature profile", vim.log.levels.WARN)
     end
@@ -363,6 +382,26 @@ local function apply(view)
 
   util.notify("Applied Cargo features to rust-analyzer")
   close(view)
+end
+
+---@param view CargoFeaturesView
+local function prompt_save_profile(view)
+  vim.ui.input({
+    prompt = "Profile name",
+    default = config.get().persistence.default_profile,
+  }, function(input)
+    local name = type(input) == "string" and vim.trim(input) or ""
+    if name == "" then
+      return
+    end
+
+    local ok, err = save_profile(view, name)
+    if ok then
+      util.notify(("Saved Cargo feature profile: %s"):format(name))
+    else
+      util.notify(err or "Unable to save Cargo feature profile", vim.log.levels.ERROR)
+    end
+  end)
 end
 
 ---@param view CargoFeaturesView
@@ -471,6 +510,9 @@ local function attach_keymaps(view)
   map(keymaps.reset, function()
     reset(view)
   end, view.bufnr)
+  map(keymaps.save_profile, function()
+    prompt_save_profile(view)
+  end, view.bufnr)
   map(keymaps.close, function()
     close(view)
   end, view.bufnr)
@@ -519,5 +561,6 @@ end
 
 M._help_lines = help_lines
 M._reset = reset
+M._save_profile = save_profile
 
 return M

@@ -80,7 +80,7 @@ local function mark_invalid_store(path, reason)
 end
 
 local function load()
-  if loaded or not config.get().persistence.enabled then
+  if loaded then
     return
   end
   loaded = true
@@ -138,10 +138,6 @@ local function backup_invalid_store(path)
 end
 
 local function save()
-  if not config.get().persistence.enabled then
-    return false, "persistence is disabled"
-  end
-
   local path = state_path()
   vim.fn.mkdir(vim.fs.dirname(path), "p")
   local backup_ok, backup_err = backup_invalid_store(path)
@@ -161,9 +157,6 @@ end
 ---@return boolean ok
 ---@return string? err
 function M.save_profile(name, opts)
-  if not config.get().persistence.enabled then
-    return false, "persistence is disabled"
-  end
   if type(opts) ~= "table" then
     return false, "profile options are required"
   end
@@ -197,9 +190,6 @@ end
 ---@param opts table
 ---@return CargoFeaturesProfile?
 function M.load_profile(name, opts)
-  if not config.get().persistence.enabled then
-    return nil
-  end
   opts = opts or {}
 
   local key = profile_key(opts)
@@ -219,9 +209,6 @@ end
 ---@return boolean ok
 ---@return string? err
 function M.delete_profile(name, opts)
-  if not config.get().persistence.enabled then
-    return false, "persistence is disabled"
-  end
   opts = opts or {}
 
   local key = profile_key(opts)
@@ -245,9 +232,6 @@ end
 ---@param opts table
 ---@return string[]
 function M.list_profiles(opts)
-  if not config.get().persistence.enabled then
-    return {}
-  end
   opts = opts or {}
 
   local key = profile_key(opts)

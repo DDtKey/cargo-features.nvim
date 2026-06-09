@@ -11,10 +11,9 @@ local M = {}
 ---@field has_default? boolean
 ---@field default_enabled? boolean
 ---@field all_enabled? boolean
----@field allow_all_features_token? boolean
 
--- In-memory restart resilience. These entries are always session-local and are
--- reapplied to matching rust_analyzer clients after user-triggered restarts.
+-- In-memory session reapply state. These entries are always session-local and
+-- reapplied only to safe matching rust-analyzer clients on LspAttach.
 ---@type table<string, CargoFeaturesAppliedSelection>
 local applied = {}
 

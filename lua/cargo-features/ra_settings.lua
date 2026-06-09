@@ -1,4 +1,3 @@
-local config = require("cargo-features.config")
 local util = require("cargo-features.util")
 
 local M = {}
@@ -152,16 +151,7 @@ end
 ---@param opts CargoFeaturesApplyOptions
 ---@return string[]|"all"
 function M.resolve_cargo_features(selected, opts)
-  local cargo_features = selected
-  if
-    config.get().lsp.use_all_features_token
-    and opts.allow_all_features_token
-    and opts.scope == "workspace"
-    and opts.all_enabled
-  then
-    cargo_features = "all"
-  end
-  return cargo_features
+  return selected
 end
 
 ---@param value any
@@ -205,13 +195,9 @@ function M.desired_reapply_config(client, features, opts)
     desired.cargo_no_default = opts.default_enabled ~= true
   end
 
-  local sync = config.get().lsp.sync_check_features
-  if sync == "always" then
-    desired.check_features = cargo_features
-    if opts.has_default then
-      desired.check_no_default = opts.default_enabled ~= true
-    end
-  elseif sync == "if_set" and type(ra.check) == "table" then
+  -- Keep check.* conservative and internal: only mirror Cargo feature settings
+  -- when the user already has explicit rust-analyzer.check.* feature keys.
+  if type(ra.check) == "table" then
     if ra.check.features ~= nil then
       desired.check_features = cargo_features
     end
@@ -239,11 +225,6 @@ function M.has_explicit_feature_config(client, opts)
   end
 
   if type(ra.check) ~= "table" then
-    return false
-  end
-
-  local sync = config.get().lsp.sync_check_features
-  if sync == "never" then
     return false
   end
 
@@ -323,14 +304,9 @@ function M.apply(client, selected, opts)
     ra.cargo.allFeatures = false
   end
 
-  local sync = config.get().lsp.sync_check_features
-  if sync == "always" then
-    ra.check = ra.check or {}
-    ra.check.features = cargo_features
-    if opts.has_default then
-      ra.check.noDefaultFeatures = opts.default_enabled ~= true
-    end
-  elseif sync == "if_set" and type(ra.check) == "table" then
+  -- Keep check.* conservative and internal: only mirror Cargo feature settings
+  -- when the user already has explicit rust-analyzer.check.* feature keys.
+  if type(ra.check) == "table" then
     if ra.check.features ~= nil then
       ra.check.features = cargo_features
     end
@@ -339,9 +315,7 @@ function M.apply(client, selected, opts)
     end
   end
 
-  if config.get().lsp.notify then
-    client:notify("workspace/didChangeConfiguration", { settings = settings })
-  end
+  client:notify("workspace/didChangeConfiguration", { settings = settings })
 end
 
 ---@class CargoFeaturesResetOptions
@@ -390,22 +364,16 @@ function M.reset(client, opts)
     ra.cargo.noDefaultFeatures = nil
     ra.cargo.allFeatures = nil
 
-    if config.get().lsp.sync_check_features == "always" then
-      if type(ra.check) == "table" then
-        ra.check.features = nil
-        ra.check.noDefaultFeatures = nil
-      end
-      if is_empty_table(ra.check) then
-        ra.check = nil
-      end
+    -- Without an ownership snapshot, forced reset clears Cargo feature settings
+    -- only. User-authored rust-analyzer.check.* config is left intact.
+    if type(ra.check) == "table" and is_empty_table(ra.check) then
+      ra.check = nil
     end
   end
 
   clear_original_settings(client, opts)
 
-  if config.get().lsp.notify then
-    client:notify("workspace/didChangeConfiguration", { settings = settings })
-  end
+  client:notify("workspace/didChangeConfiguration", { settings = settings })
 
   return true, nil
 end

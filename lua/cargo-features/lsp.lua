@@ -6,6 +6,8 @@ local util = require("cargo-features.util")
 local M = {}
 local autocmd_created = false
 local reapplied_clients = {}
+local applied_attach_profiles = {}
+local BUFFER_REATTACH_DELAY_MS = 700
 
 ---@param client vim.lsp.Client
 ---@return boolean
@@ -261,7 +263,6 @@ end
 ---@field all_enabled? boolean
 ---@field scope? "package"|"workspace"
 ---@field allow_global? boolean
----@field allow_all_features_token? boolean
 ---@field remember? boolean
 
 ---@class CargoFeaturesResetOptions
@@ -288,20 +289,6 @@ local function rust_buffers_for_client(client)
     end
   end
 
-  if #bufnrs == 0 then
-    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_loaded(bufnr) then
-        local clients = rust_analyzer_clients({ bufnr = bufnr })
-        for _, attached in ipairs(clients) do
-          if attached.id == client.id then
-            table.insert(bufnrs, bufnr)
-            break
-          end
-        end
-      end
-    end
-  end
-
   local rust = {}
   for _, bufnr in ipairs(bufnrs) do
     if
@@ -315,26 +302,67 @@ local function rust_buffers_for_client(client)
   return util.unique_sorted(rust)
 end
 
+---@param client_id integer
+---@param bufnr integer
+---@return boolean
+local function buffer_has_client(client_id, bufnr)
+  if type(vim.lsp.get_buffers_by_client_id) ~= "function" then
+    return false
+  end
+  local ok, bufnrs = pcall(vim.lsp.get_buffers_by_client_id, client_id)
+  if not ok or type(bufnrs) ~= "table" then
+    return false
+  end
+  for _, attached_bufnr in ipairs(bufnrs) do
+    if attached_bufnr == bufnr then
+      return true
+    end
+  end
+  return false
+end
+
+---@param client_id integer
+---@return boolean
+local function client_exists(client_id)
+  if type(vim.lsp.get_client_by_id) ~= "function" then
+    return true
+  end
+  local ok, client = pcall(vim.lsp.get_client_by_id, client_id)
+  return ok and client ~= nil
+end
+
 ---@param clients vim.lsp.Client[]
-function M.refresh_after_apply(clients)
-  if not config.get().lsp.refresh_after_apply then
+function M.reattach_buffers_after_apply(clients)
+  if
+    type(vim.lsp.buf_detach_client) ~= "function"
+    or type(vim.lsp.buf_attach_client) ~= "function"
+    or type(vim.lsp.get_buffers_by_client_id) ~= "function"
+  then
     return
   end
 
-  local semantic = vim.lsp.semantic_tokens
-  if type(semantic) ~= "table" then
-    return
-  end
-
-  local refreshed = {}
+  local seen = {}
   for _, client in ipairs(clients) do
-    if client.id then
-      if type(semantic.force_refresh) == "function" then
-        for _, bufnr in ipairs(rust_buffers_for_client(client)) do
-          if not refreshed[bufnr] then
-            refreshed[bufnr] = true
-            pcall(semantic.force_refresh, bufnr)
-          end
+    local client_id = client.id
+    if client_id then
+      for _, bufnr in ipairs(rust_buffers_for_client(client)) do
+        local key = ("%s:%s"):format(client_id, bufnr)
+        if not seen[key] then
+          seen[key] = true
+          vim.defer_fn(function()
+            if
+              not vim.api.nvim_buf_is_valid(bufnr)
+              or not vim.api.nvim_buf_is_loaded(bufnr)
+              or not client_exists(client_id)
+              or not buffer_has_client(client_id, bufnr)
+            then
+              return
+            end
+
+            pcall(vim.lsp.buf_detach_client, bufnr, client_id)
+            pcall(vim.lsp.buf_attach_client, bufnr, client_id)
+            pcall(vim.cmd, "redraw!")
+          end, BUFFER_REATTACH_DELAY_MS)
         end
       end
     end
@@ -422,7 +450,6 @@ function M.apply(selected, opts)
       has_default = opts.has_default,
       default_enabled = opts.default_enabled,
       all_enabled = opts.all_enabled,
-      allow_all_features_token = opts.allow_all_features_token,
     })
   end
 
@@ -435,14 +462,13 @@ function M.apply(selected, opts)
       if merged_with_remembered then
         effective_opts = vim.tbl_extend("force", opts, {
           all_enabled = false,
-          allow_all_features_token = false,
         })
       end
     end
     ra_settings.apply(client, effective_selected, effective_opts)
   end
 
-  M.refresh_after_apply(clients)
+  M.reattach_buffers_after_apply(clients)
 
   return true, nil
 end
@@ -489,7 +515,7 @@ function M.reset(opts)
     })
   end
 
-  M.refresh_after_apply(reset_clients)
+  M.reattach_buffers_after_apply(reset_clients)
   return true, nil
 end
 
@@ -569,18 +595,7 @@ local function merged_entry_opts(entries)
   end
 
   effective.all_enabled = false
-  effective.allow_all_features_token = false
   return effective
-end
-
----@param entries CargoFeaturesAppliedSelection[]
----@return boolean
-local function can_reapply_all_token(entries)
-  local entry = entries[1]
-  return #entries == 1
-    and entry.scope == "workspace"
-    and entry.all_enabled == true
-    and entry.allow_all_features_token == true
 end
 
 ---@param client vim.lsp.Client
@@ -588,8 +603,7 @@ function M.reapply_for_client(client)
   if not M.is_rust_analyzer_client(client) then
     return
   end
-  local reapply_policy = config.get().lsp.reapply_policy
-  if reapply_policy == "never" then
+  if not config.get().lsp.reapply then
     return
   end
 
@@ -622,18 +636,14 @@ function M.reapply_for_client(client)
   local entries = groups[1].entries
   local features = merged_entry_features(entries)
   local effective_opts = merged_entry_opts(entries)
-
-  if not can_reapply_all_token(entries) then
-    effective_opts.all_enabled = false
-    effective_opts.allow_all_features_token = false
-  end
+  effective_opts.all_enabled = false
 
   local desired = ra_settings.desired_reapply_config(client, features, effective_opts)
   if ra_settings.current_config_matches(client, desired) then
     return
   end
 
-  if reapply_policy == "if_empty" and ra_settings.has_explicit_feature_config(client, effective_opts) then
+  if ra_settings.has_explicit_feature_config(client, effective_opts) then
     vim.notify(
       "cargo-features.nvim: rust-analyzer already has explicit Cargo feature settings; skipping remembered feature reapply",
       vim.log.levels.INFO,
@@ -643,10 +653,149 @@ function M.reapply_for_client(client)
   end
 
   ra_settings.apply(client, features, effective_opts)
+  M.reattach_buffers_after_apply({ client })
+end
+
+---@param opts CargoFeaturesApplyOptions
+---@return string
+local function attach_profile_key(client, opts)
+  local key
+  if opts.scope == "workspace" and opts.workspace_root and opts.workspace_root ~= "" then
+    key = util.abspath(opts.workspace_root)
+  else
+    key = util.abspath(opts.manifest_path or "")
+  end
+  return ("%s:%s:%s"):format(client.id or tostring(client), opts.scope or "package", key)
+end
+
+---@param base CargoFeaturesApplyOptions
+---@return CargoFeaturesApplyOptions[]
+local function profile_contexts_for_attach(base)
+  local contexts = {}
+  if base.manifest_path and base.manifest_path ~= "" then
+    table.insert(contexts, vim.tbl_extend("force", base, {
+      scope = "package",
+    }))
+  end
+  if base.workspace_root and base.workspace_root ~= "" then
+    table.insert(contexts, vim.tbl_extend("force", base, {
+      scope = "workspace",
+    }))
+  end
+  return contexts
+end
+
+---@param bufnr integer
+---@return CargoFeaturesApplyOptions?
+local function attached_buffer_context(bufnr)
+  local ok, cargo = pcall(require, "cargo-features.cargo")
+  if not ok then
+    return nil
+  end
+
+  local manifest_path = cargo.find_manifest(bufnr)
+  if not manifest_path then
+    return nil
+  end
+
+  local context = {
+    bufnr = bufnr,
+    manifest_path = manifest_path,
+    scope = "package",
+  }
+
+  local manifest = cargo.load_manifest(manifest_path)
+  if manifest then
+    context.workspace_root = manifest.workspace_root
+    context.package_name = manifest.package_name
+    context.scope = manifest.scope or context.scope
+  end
+
+  return context
+end
+
+---@param context CargoFeaturesApplyOptions
+---@return CargoFeaturesProfile?
+---@return CargoFeaturesApplyOptions?
+local function default_profile_for_attach(context)
+  local profiles = require("cargo-features.profile_store")
+  local name = config.get().persistence.default_profile
+
+  -- Prefer the package-local default profile when both package and workspace
+  -- defaults exist. Workspace fallback keeps root-level profiles usable from
+  -- member Rust buffers.
+  for _, candidate in ipairs(profile_contexts_for_attach(context)) do
+    local profile = profiles.load_profile(name, candidate)
+    if profile then
+      return profile, candidate
+    end
+  end
+
+  return nil, nil
+end
+
+---@param client vim.lsp.Client
+---@param bufnr integer
+---@return boolean applied
+function M.apply_default_profile_for_client(client, bufnr)
+  if not M.is_rust_analyzer_client(client) or config.get().persistence.apply_on_attach ~= true then
+    return false
+  end
+
+  local context = attached_buffer_context(bufnr)
+  if not context then
+    return false
+  end
+
+  local profile, profile_context = default_profile_for_attach(context)
+  if not profile or not profile_context then
+    return false
+  end
+
+  local apply_opts = vim.tbl_extend("force", profile_context, {
+    default_enabled = profile.default_enabled,
+    has_default = profile.default_enabled ~= nil,
+    manifest_path = profile.manifest_path or profile_context.manifest_path,
+    package_name = profile.package_name or profile_context.package_name,
+    scope = profile.scope or profile_context.scope,
+    workspace_root = profile.workspace_root or profile_context.workspace_root,
+    remember = true,
+  })
+
+  local key = attach_profile_key(client, apply_opts)
+  if applied_attach_profiles[key] then
+    return false
+  end
+  applied_attach_profiles[key] = true
+
+  local features = profile.features or {}
+  local desired = ra_settings.desired_reapply_config(client, features, apply_opts)
+  if ra_settings.current_config_matches(client, desired) then
+    return false
+  end
+
+  if ra_settings.has_explicit_feature_config(client, apply_opts) then
+    return false
+  end
+
+  state.remember_applied({
+    selected = features,
+    manifest_path = apply_opts.manifest_path,
+    workspace_root = apply_opts.workspace_root,
+    package_name = apply_opts.package_name,
+    scope = apply_opts.scope,
+    has_default = apply_opts.has_default,
+    default_enabled = apply_opts.default_enabled,
+    all_enabled = false,
+  })
+  ra_settings.apply(client, features, apply_opts)
+  M.reattach_buffers_after_apply({ client })
+  return true
 end
 
 function M._clear_reapplied_clients()
   reapplied_clients = {}
+  applied_attach_profiles = {}
 end
 
 M._rust_buffers_for_client = rust_buffers_for_client
@@ -663,6 +812,7 @@ function M.create_autocmd()
     callback = function(args)
       local client = vim.lsp.get_client_by_id(args.data.client_id)
       M.reapply_for_client(client)
+      M.apply_default_profile_for_client(client, args.buf)
     end,
   })
 end

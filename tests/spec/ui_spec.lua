@@ -11,8 +11,10 @@ describe("floating window UI", function()
   local original_load_manifest_async
   local original_lsp_get_clients
   local original_lsp_enabled_features
+  local original_lsp_apply
   local original_lsp_reset
   local original_notify
+  local original_ui_input
   local original_columns
   local original_lines
   local original_xdg_state_home
@@ -23,8 +25,10 @@ describe("floating window UI", function()
     original_load_manifest_async = cargo.load_manifest_async
     original_lsp_get_clients = lsp.get_clients
     original_lsp_enabled_features = lsp.enabled_features
+    original_lsp_apply = lsp.apply
     original_lsp_reset = lsp.reset
     original_notify = vim.notify
+    original_ui_input = vim.ui.input
     original_columns = vim.o.columns
     original_lines = vim.o.lines
     original_xdg_state_home = vim.env.XDG_STATE_HOME
@@ -41,8 +45,10 @@ describe("floating window UI", function()
     cargo.load_manifest_async = original_load_manifest_async
     lsp.get_clients = original_lsp_get_clients
     lsp.enabled_features = original_lsp_enabled_features
+    lsp.apply = original_lsp_apply
     lsp.reset = original_lsp_reset
     vim.notify = original_notify
+    vim.ui.input = original_ui_input
     profiles._reset_for_tests()
     config.setup()
     vim.env.XDG_STATE_HOME = original_xdg_state_home
@@ -131,6 +137,7 @@ describe("floating window UI", function()
       "A            All",
       "W            Apply",
       "R            Reset",
+      "S            Save profile",
       "q/Esc        Close",
     }, ui._help_lines(60))
   end)
@@ -143,6 +150,7 @@ describe("floating window UI", function()
           toggle_all = "!",
           apply = "a",
           reset = "r",
+          save_profile = "s",
           close = "x",
         },
       },
@@ -153,6 +161,7 @@ describe("floating window UI", function()
       "!  All",
       "a  Apply",
       "r  Reset",
+      "s  Save profile",
       "x  Close",
     }, ui._help_lines(60))
   end)
@@ -165,6 +174,7 @@ describe("floating window UI", function()
       "A All",
       "W Apply",
       "R Reset",
+      "S Save profile",
       "q/Esc Close",
     }, ui._help_lines(12))
   end)
@@ -205,6 +215,109 @@ describe("floating window UI", function()
     assert.are.equal("☐ serde", after[1])
   end)
 
+  it("save profile key prompts for a profile name", function()
+    stub_manifest()
+    require("cargo-features").setup()
+
+    local prompt_opts
+    vim.ui.input = function(opts, callback)
+      prompt_opts = opts
+      callback(nil)
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_feedkeys("S", "x", false)
+
+    assert.are.equal("Profile name", prompt_opts.prompt)
+    assert.are.equal("default", prompt_opts.default)
+  end)
+
+  it("does nothing when save profile input is cancelled or blank", function()
+    stub_manifest()
+    require("cargo-features").setup()
+
+    vim.ui.input = function(_, callback)
+      callback("   ")
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_feedkeys("S", "x", false)
+
+    local profile = profiles.load_profile("debug", {
+      manifest_path = simple_manifest,
+      scope = "package",
+    })
+    assert.is_nil(profile)
+  end)
+
+  it("saves current UI selection without applying or closing", function()
+    stub_manifest()
+    require("cargo-features").setup()
+
+    lsp.get_clients = function()
+      return { {} }
+    end
+    lsp.enabled_features = function()
+      return { metrics = true }
+    end
+
+    local apply_called = false
+    lsp.apply = function()
+      apply_called = true
+      return true
+    end
+    vim.ui.input = function(_, callback)
+      callback("debug")
+    end
+
+    require("cargo-features").open()
+    local ui_buf = vim.api.nvim_get_current_buf()
+    vim.api.nvim_feedkeys("S", "x", false)
+
+    assert.is_false(apply_called)
+    assert.is_true(vim.api.nvim_buf_is_valid(ui_buf))
+
+    local profile = profiles.load_profile("debug", {
+      manifest_path = simple_manifest,
+      scope = "package",
+    })
+    assert.are.same({ "metrics" }, profile.features)
+    assert.is_false(profile.default_enabled)
+  end)
+
+  it("can apply a profile saved from the UI", function()
+    stub_manifest()
+    require("cargo-features").setup()
+
+    lsp.get_clients = function()
+      return { {} }
+    end
+    lsp.enabled_features = function()
+      return { serde = true }
+    end
+    vim.ui.input = function(_, callback)
+      callback("debug")
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_feedkeys("S", "x", false)
+
+    local applied_features
+    lsp.apply = function(features)
+      applied_features = features
+      return true
+    end
+
+    local ok, err = require("cargo-features").apply_profile("debug", {
+      bufnr = 9,
+      manifest_path = simple_manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "serde" }, applied_features)
+  end)
+
   it("reset key calls reset for the current manifest", function()
     stub_manifest()
     require("cargo-features").setup()
@@ -226,11 +339,7 @@ describe("floating window UI", function()
   it("keeps live rust-analyzer state on open by default even when a profile exists", function()
     stub_manifest()
 
-    require("cargo-features").setup({
-      persistence = {
-        enabled = true,
-      },
-    })
+    require("cargo-features").setup()
     save_default_profile()
 
     lsp.get_clients = function()
@@ -247,12 +356,40 @@ describe("floating window UI", function()
     assert.are.equal("☐ metrics", lines[2])
   end)
 
-  it("loads the default profile with auto_load if_no_client only when no client matches", function()
+  it("saves the default profile with save_on_apply after successful UI apply", function()
     stub_manifest()
     require("cargo-features").setup({
       persistence = {
-        enabled = true,
-        auto_load = "if_no_client",
+        save_on_apply = true,
+      },
+    })
+
+    lsp.get_clients = function()
+      return { {} }
+    end
+    lsp.enabled_features = function()
+      return { metrics = true }
+    end
+    lsp.apply = function()
+      return true, nil
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_feedkeys("W", "x", false)
+
+    local profile = profiles.load_profile(nil, {
+      manifest_path = simple_manifest,
+      scope = "package",
+    })
+    assert.are.same({ "metrics" }, profile.features)
+    assert.is_false(profile.default_enabled)
+  end)
+
+  it("loads the default profile with load_on_open if_no_client only when no client matches", function()
+    stub_manifest()
+    require("cargo-features").setup({
+      persistence = {
+        load_on_open = "if_no_client",
       },
     })
     save_default_profile()
@@ -264,13 +401,12 @@ describe("floating window UI", function()
     assert.are.equal("☑ metrics", lines[2])
   end)
 
-  it("does not load the default profile with auto_load if_no_client when a client matches", function()
+  it("does not load the default profile with load_on_open if_no_client when a client matches", function()
     stub_manifest()
 
     require("cargo-features").setup({
       persistence = {
-        enabled = true,
-        auto_load = "if_no_client",
+        load_on_open = "if_no_client",
       },
     })
     save_default_profile()
@@ -289,13 +425,12 @@ describe("floating window UI", function()
     assert.are.equal("☐ metrics", lines[2])
   end)
 
-  it("loads the default profile with auto_load always even when rust-analyzer has state", function()
+  it("loads the default profile with load_on_open always even when rust-analyzer has state", function()
     stub_manifest()
 
     require("cargo-features").setup({
       persistence = {
-        enabled = true,
-        auto_load = "always",
+        load_on_open = "always",
       },
     })
     save_default_profile()

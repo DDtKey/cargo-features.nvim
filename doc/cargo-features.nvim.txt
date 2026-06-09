@@ -7,7 +7,7 @@ cargo-features.nvim provides a dependency-free floating window for toggling
 Cargo features and applying them to active rust-analyzer LSP clients.
 
 Requirements:
-- Neovim 0.10+
+- Neovim 0.11+
 - An already-running rust-analyzer client
 - Optional cargo executable for best feature discovery
 
@@ -25,6 +25,13 @@ COMMANDS                                      *cargo-features-commands*
 :CargoFeaturesDebug
     Print active rust-analyzer clients, attachment state, roots, workspace
     folders, and whether each client covers the current Cargo manifest.
+
+:CargoFeaturesApplyProfile [name]
+    Apply a saved Cargo feature profile to matching rust-analyzer clients.
+    With a name, apply that saved profile. When both package and workspace
+    profiles have the same name, the package profile wins because it is the
+    more local context. Without a name, open a vim.ui.select picker for saved
+    package and workspace profiles in the current Cargo context.
 
 :CargoFeaturesReset
     Reset plugin-applied Cargo feature overrides for the nearest Cargo.toml.
@@ -54,8 +61,6 @@ require("cargo-features").apply({features}, {opts})   *cargo-features.apply()*
                                   UI apply passes this explicitly.
       allow_global                Apply to all rust-analyzer clients only when
                                   explicitly true.
-      allow_all_features_token    Allow cargo.features = "all" when config,
-                                  scope, and all_enabled also permit it.
 
 require("cargo-features").reset({opts})          *cargo-features.reset()*
     Reset plugin-applied Cargo feature overrides for matching rust-analyzer
@@ -72,10 +77,16 @@ require("cargo-features").reset({opts})          *cargo-features.reset()*
                                   even when no plugin-owned override is
                                   remembered.
 
+require("cargo-features").apply_profile({name}, {opts}) *cargo-features.apply_profile()*
+    Load a named profile and apply it to matching rust-analyzer clients. The
+    current buffer and nearest Cargo.toml are used when opts does not provide
+    a bufnr or manifest_path. If name is omitted, persistence.default_profile
+    is used.
+
 require("cargo-features").save_profile({name}, {opts})   *cargo-features.save_profile()*
-    Experimental pre-1.0 helper. Save a named profile when persistence.enabled
-    is true. opts.manifest_path is required. opts.features, default_enabled,
-    scope, workspace_root, and package_name are stored when provided.
+    Experimental pre-1.0 helper. Save a named profile. opts.manifest_path is
+    required. opts.features, default_enabled, scope, workspace_root, and
+    package_name are stored when provided.
 
 require("cargo-features").load_profile({name}, {opts})   *cargo-features.load_profile()*
     Experimental pre-1.0 helper. Load a named profile for a manifest/workspace
@@ -107,17 +118,13 @@ require("cargo-features").setup({
     metadata_cwd = nil,
   },
   lsp = {
-    notify = true,
-    reapply_policy = "if_empty",
-    refresh_after_apply = true,
-    sync_check_features = "if_set",
-    use_all_features_token = false,
+    reapply = true,
   },
   persistence = {
-    enabled = false,
     default_profile = "default",
-    auto_save = false,
-    auto_load = "never",
+    save_on_apply = false,
+    load_on_open = "never",
+    apply_on_attach = false,
   },
   ui = {
     ascii_icons = false,
@@ -136,6 +143,7 @@ require("cargo-features").setup({
       toggle_all = "A",
       apply = "W",
       reset = "R",
+      save_profile = "S",
       close = { "q", "<Esc>" },
     },
   },
@@ -153,45 +161,39 @@ Cargo options:
       Escape hatches for projects that need non-default Cargo invocation.
 
 LSP options:
-  reapply_policy
-      "if_empty" by default. Controls automatic in-memory reapply when a
-      rust-analyzer client attaches:
-        "never"    Do not automatically reapply remembered plugin state.
-        "if_empty" Reapply only when the client has no explicit Cargo feature
-                   settings.
-        "always"   Reapply remembered plugin state even over explicit settings.
-
-  refresh_after_apply
-      true by default. After apply/reset, request a semantic-token refresh when
-      supported by Neovim. This is best-effort and scoped to currently loaded
-      Rust buffers attached to the rust-analyzer clients that were updated. It
-      does not reload buffers, open unloaded buffers, or restart rust-analyzer.
-
-  sync_check_features
-      "if_set" preserves rust-analyzer's inheritance by only updating
-      rust-analyzer.check.features when the user already configured it.
-
-  use_all_features_token
-      Disabled by default. `cargo.features = "all"` is workspace-wide and is
-      not equivalent to enabling every visible package feature checkbox.
+  reapply
+      true by default. Enables session-local LspAttach reapply. UI-applied
+      selections are remembered in memory and reapplied to matching
+      rust-analyzer clients that attach later in the same Neovim session, but
+      only when the new client has no explicit Cargo/check feature settings.
+      Set false to disable automatic session reapply.
 
 Persistence options:
-  enabled
-      Enables disk persistence under stdpath("state").
+  Profile storage is available for explicit save/load actions under
+  stdpath("state")/cargo-features.nvim/profiles.json. Profiles are user-local
+  global storage keyed by absolute workspace/manifest paths, not project-local
+  files.
 
   default_profile
-      Profile name used by the UI until named profile UI exists.
+      Profile name used for automatic save/load and as the default value in the
+      UI save prompt.
 
-  auto_save
-      Save the default profile when applying from the UI.
+  save_on_apply
+      Save the UI-applied selection to default_profile after successful UI
+      apply.
 
-  auto_load
+  load_on_open
       "never" by default. Controls profile preselection on UI open:
         "never"        Never preselect from profiles.
         "if_no_client" Load the default profile only when no matching
                        rust-analyzer client is available.
         "always"       Load the default profile even when rust-analyzer has
                        current feature state.
+
+  apply_on_attach
+      false by default. When true, apply default_profile to matching
+      rust-analyzer clients when they attach, but only when the client has no
+      explicit Cargo/check feature settings.
 
 Runtime behavior:
   Applying features mutates live rust-analyzer settings and sends
@@ -207,14 +209,34 @@ Runtime behavior:
   :CargoFeaturesReset clears plugin-applied live overrides remembered in the
   current Neovim session and does not delete disk profiles.
   :CargoFeaturesReset! can clear matching live Cargo feature settings without
-  an ownership record. Reset restores check settings the plugin changed; forced
-  reset clears check settings only when lsp.sync_check_features = "always".
+  an ownership record. Reset restores check settings the plugin changed.
+  Reset does not delete disk profiles.
+
+  :CargoFeaturesApplyProfile applies a saved profile directly to rust-analyzer.
+  With an argument, it applies that profile directly, preferring a package
+  profile over a workspace profile when both have the same name. Without an
+  argument, it opens a built-in vim.ui.select picker for package and workspace
+  profiles saved in the current Cargo context. load_on_open = "never" only
+  disables automatic UI preselection; profiles can still be applied explicitly
+  with :CargoFeaturesApplyProfile or require("cargo-features").apply_profile().
+
+  In the UI, S saves the current checkbox selection as a named profile without
+  applying it to rust-analyzer or closing the UI. Pressing Enter at the prompt
+  saves to persistence.default_profile, normally "default". W applies to
+  rust-analyzer; when persistence.save_on_apply = true, it also saves
+  default_profile after a successful apply. Automatic save/load/apply only uses
+  default_profile; S and :CargoFeaturesApplyProfile handle named profiles
+  explicitly.
+
+  load_on_open is UI preselection only. It does not apply a profile to
+  rust-analyzer on startup. Use persistence.apply_on_attach = true to apply
+  default_profile to matching rust-analyzer clients when they attach. This
+  attach-time apply skips clients with explicit Cargo/check feature settings.
 
   Live rust-analyzer settings are the source of truth while a client is
-  attached. In-memory state is only restart/LspAttach recovery.
-  lsp.reapply_policy controls whether remembered plugin state may overwrite
-  explicit rust-analyzer Cargo feature config. The default is conservative:
-  "if_empty".
+  attached. Session-local reapply only runs when the new client has no explicit
+  Cargo/check feature settings, so it does not overwrite user-authored
+  rust-analyzer config.
 
   Reapply groups remembered selections by Cargo workspace. If one
   rust-analyzer client appears to cover multiple unrelated Cargo workspaces,
@@ -228,6 +250,13 @@ Runtime behavior:
   toggling is intentionally not modeled for workspace member contexts. If
   remembered default states ever conflict inside one workspace, reapply keeps
   defaults enabled when any remembered entry enables them.
+
+  After apply/reset, the plugin makes a private best-effort reattach of loaded
+  Rust buffers attached to the updated rust-analyzer clients to refresh
+  inactive-code highlighting. It does not reload files, delete buffers, open
+  unloaded buffers, or restart rust-analyzer. Some setups may still require
+  closing and reopening the affected buffer. This does not mean the feature
+  config failed to apply.
 
   Disk persistence uses a versioned named-profile file:
 >
@@ -251,9 +280,58 @@ Runtime behavior:
   Live apply can be checked locally with `just validate-ra`, which prints the
   rust-analyzer version it used.
 
+  Persistence is split into separate behaviors:
+    save_on_apply  Save the UI-applied selection to default_profile.
+    load_on_open   Control whether opening the UI preselects default_profile.
+    apply_on_attach
+                  Apply default_profile to matching rust-analyzer clients on
+                  attach when they have no explicit Cargo/check feature config.
+
+  Profile storage is always available for explicit save/load actions. Automatic
+  save/load/apply only uses default_profile.
+
   Profile auto-load follows the same source-of-truth rule: live rust-analyzer
-  settings win by default. A profile overrides live settings only with
-  persistence.auto_load = "always"; "if_no_client" is the safe fallback mode.
+  settings win by default. A profile overrides live settings on UI open only
+  with persistence.load_on_open = "always"; "if_no_client" is the safe fallback
+  mode.
+
+Persistence examples:
+>
+  -- Remember my last UI selection.
+  -- UI opens with the saved profile even if rust-analyzer is active.
+  require("cargo-features").setup({
+    persistence = {
+      save_on_apply = true,
+      load_on_open = "always",
+    },
+  })
+
+  -- Preselect saved profile only when rust-analyzer is not active.
+  -- Live rust-analyzer settings win when RA is active.
+  require("cargo-features").setup({
+    persistence = {
+      save_on_apply = true,
+      load_on_open = "if_no_client",
+    },
+  })
+
+  -- Manual profiles only.
+  -- Use :CargoFeaturesApplyProfile <name> to apply profiles explicitly.
+  require("cargo-features").setup({
+    persistence = {
+      save_on_apply = false,
+      load_on_open = "never",
+    },
+  })
+
+  -- Apply default_profile when rust-analyzer attaches.
+  -- Explicit rust-analyzer Cargo/check feature settings still win.
+  require("cargo-features").setup({
+    persistence = {
+      apply_on_attach = true,
+    },
+  })
+<
 
 UI options:
   ascii_icons

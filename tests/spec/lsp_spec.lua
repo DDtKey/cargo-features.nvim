@@ -1,4 +1,6 @@
 local config = require("cargo-features.config")
+local api = require("cargo-features")
+local cargo = require("cargo-features.cargo")
 local lsp = require("cargo-features.lsp")
 local profiles = require("cargo-features.profile_store")
 local ra_settings = require("cargo-features.ra_settings")
@@ -43,9 +45,14 @@ describe("rust-analyzer LSP integration", function()
   local original_get_clients
   local original_cmd
   local original_get_buffers_by_client_id
+  local original_get_client_by_id
+  local original_buf_detach_client
+  local original_buf_attach_client
   local original_notify
-  local original_semantic_tokens
+  local original_defer_fn
   local original_xdg_state_home
+  local original_find_manifest
+  local original_load_manifest
   local clients
   local notifications
   local restart_called
@@ -54,9 +61,7 @@ describe("rust-analyzer LSP integration", function()
   before_each(function()
     config.setup({
       lsp = {
-        notify = true,
-        sync_check_features = "if_set",
-        use_all_features_token = false,
+        reapply = true,
       },
     })
     state.clear_applied()
@@ -64,9 +69,14 @@ describe("rust-analyzer LSP integration", function()
     original_get_clients = vim.lsp.get_clients
     original_cmd = vim.cmd
     original_get_buffers_by_client_id = vim.lsp.get_buffers_by_client_id
+    original_get_client_by_id = vim.lsp.get_client_by_id
+    original_buf_detach_client = vim.lsp.buf_detach_client
+    original_buf_attach_client = vim.lsp.buf_attach_client
     original_notify = vim.notify
-    original_semantic_tokens = vim.lsp.semantic_tokens
+    original_defer_fn = vim.defer_fn
     original_xdg_state_home = vim.env.XDG_STATE_HOME
+    original_find_manifest = cargo.find_manifest
+    original_load_manifest = cargo.load_manifest
     clients = {}
     notifications = {}
     restart_called = false
@@ -109,15 +119,29 @@ describe("rust-analyzer LSP integration", function()
         opts = opts,
       })
     end
+    vim.defer_fn = function() end
+    vim.lsp.get_client_by_id = function(client_id)
+      for _, client in ipairs(clients) do
+        if client.id == client_id then
+          return client
+        end
+      end
+      return nil
+    end
   end)
 
   after_each(function()
     vim.lsp.get_clients = original_get_clients
     vim.cmd = original_cmd
     vim.lsp.get_buffers_by_client_id = original_get_buffers_by_client_id
+    vim.lsp.get_client_by_id = original_get_client_by_id
+    vim.lsp.buf_detach_client = original_buf_detach_client
+    vim.lsp.buf_attach_client = original_buf_attach_client
     vim.notify = original_notify
-    vim.lsp.semantic_tokens = original_semantic_tokens
+    vim.defer_fn = original_defer_fn
     vim.env.XDG_STATE_HOME = original_xdg_state_home
+    cargo.find_manifest = original_find_manifest
+    cargo.load_manifest = original_load_manifest
     vim.fn.delete(state_home, "rf")
     profiles._reset_for_tests()
     state.clear_applied()
@@ -198,27 +222,53 @@ describe("rust-analyzer LSP integration", function()
     })))
   end)
 
-  it("defaults to conservative reapply when the client has no explicit feature settings", function()
+  it("exposes only session reapply in public LSP config", function()
     config.setup()
 
-    assert.are.equal("if_empty", config.get().lsp.reapply_policy)
+    assert.are.same({ reapply = true }, config.get().lsp)
   end)
 
-  it("normalizes invalid reapply_policy to if_empty", function()
+  it("normalizes invalid or old LSP config to safe session reapply", function()
     config.setup({
       lsp = {
-        reapply_policy = "if-empty",
+        notify = false,
+        reapply_policy = "always",
+        refresh_delay_ms = -1,
+        sync_check_features = "always",
+        use_all_features_token = true,
       },
     })
 
-    assert.are.equal("if_empty", config.get().lsp.reapply_policy)
+    assert.are.same({ reapply = true }, config.get().lsp)
 
     config.setup({
       lsp = {
-        reapply_policy = false,
+        reapply = false,
       },
     })
-    assert.are.equal("if_empty", config.get().lsp.reapply_policy)
+
+    assert.are.same({ reapply = false }, config.get().lsp)
+  end)
+
+  it("does not expose semantic refresh controls as public config", function()
+    config.setup()
+
+    assert.is_nil(config.get().lsp.notify)
+    assert.is_nil(config.get().lsp.reapply_policy)
+    assert.is_nil(config.get().lsp.refresh_after_apply)
+    assert.is_nil(config.get().lsp.refresh_delay_ms)
+    assert.is_nil(config.get().lsp.sync_check_features)
+    assert.is_nil(config.get().lsp.use_all_features_token)
+    assert.is_nil(config.get().lsp.restart_semantic_tokens_after_apply)
+    assert.is_nil(table.concat(vim.fn.readfile("README.md"), "\n"):find("refresh_delay_ms", 1, true))
+    assert.is_nil(table.concat(vim.fn.readfile("README.md"), "\n"):find("restart_semantic_tokens_after_apply", 1, true))
+    assert.is_nil(
+      table.concat(vim.fn.readfile("doc/cargo-features.nvim.txt"), "\n"):find(
+        "refresh_delay_ms",
+        1,
+        true
+      )
+    )
   end)
 
   it("falls back to client.config.settings when client.settings is absent", function()
@@ -666,12 +716,7 @@ describe("rust-analyzer LSP integration", function()
     assert.is_false(client.settings["rust-analyzer"].check.noDefaultFeatures)
   end)
 
-  it("normal reset clears plugin-created check settings when sync_check_features is always", function()
-    config.setup({
-      lsp = {
-        sync_check_features = "always",
-      },
-    })
+  it("does not create check settings when rust-analyzer did not have explicit check features", function()
     local client = make_client(simple_root)
     clients = { client }
 
@@ -682,8 +727,7 @@ describe("rust-analyzer LSP integration", function()
       scope = "package",
       remember = true,
     }))
-    assert.are.same({ "serde" }, client.settings["rust-analyzer"].check.features)
-    assert.is_true(client.settings["rust-analyzer"].check.noDefaultFeatures)
+    assert.is_nil(client.settings["rust-analyzer"].check)
 
     local ok, err = lsp.reset({
       manifest_path = manifest,
@@ -694,12 +738,7 @@ describe("rust-analyzer LSP integration", function()
     assert.is_nil(client.settings["rust-analyzer"].check)
   end)
 
-  it("normal reset restores original check settings when sync_check_features is always", function()
-    config.setup({
-      lsp = {
-        sync_check_features = "always",
-      },
-    })
+  it("normal reset restores original check settings", function()
     local client = make_client(simple_root, {
       settings = {
         ["rust-analyzer"] = {
@@ -731,12 +770,7 @@ describe("rust-analyzer LSP integration", function()
     assert.is_false(client.settings["rust-analyzer"].check.noDefaultFeatures)
   end)
 
-  it("forced reset clears check settings only when sync_check_features is always", function()
-    config.setup({
-      lsp = {
-        sync_check_features = "always",
-      },
-    })
+  it("forced reset keeps check settings without plugin ownership", function()
     local client = make_client(simple_root, {
       settings = {
         ["rust-analyzer"] = {
@@ -760,45 +794,14 @@ describe("rust-analyzer LSP integration", function()
 
     assert.is_true(ok, err)
     local check = client.settings["rust-analyzer"].check or {}
-    assert.is_nil(check.features)
-    assert.is_nil(check.noDefaultFeatures)
-  end)
-
-  it("forced reset keeps check settings when sync_check_features is if_set", function()
-    local client = make_client(simple_root, {
-      settings = {
-        ["rust-analyzer"] = {
-          cargo = {
-            features = { "from-config" },
-          },
-          check = {
-            features = { "from-config" },
-            noDefaultFeatures = true,
-          },
-        },
-      },
-    })
-    clients = { client }
-
-    local ok, err = lsp.reset({
-      manifest_path = manifest,
-      scope = "package",
-      force = true,
-    })
-
-    assert.is_true(ok, err)
-    assert.are.same({ "from-config" }, client.settings["rust-analyzer"].check.features)
-    assert.is_true(client.settings["rust-analyzer"].check.noDefaultFeatures)
+    assert.are.same({ "from-config" }, check.features)
+    assert.is_true(check.noDefaultFeatures)
   end)
 
   it("reset does not delete disk profiles", function()
     local client = make_client(simple_root)
     clients = { client }
-    config.setup({
-      persistence = {
-        enabled = true,
-      },
-    })
+    config.setup()
     assert.is_true(profiles.save_profile("default", {
       manifest_path = manifest,
       scope = "package",
@@ -824,7 +827,65 @@ describe("rust-analyzer LSP integration", function()
     assert.are.same({ "serde" }, profile.features)
   end)
 
-  it("apply success refreshes loaded Rust buffers attached to updated clients", function()
+  it("apply_profile respects client matching and does not mutate unrelated rust-analyzer clients", function()
+    local matched = make_client(simple_root)
+    local unrelated = make_client(other_root)
+    clients = { matched, unrelated }
+    config.setup()
+    assert.is_true(profiles.save_profile("debug", {
+      manifest_path = manifest,
+      scope = "package",
+      features = { "serde" },
+      default_enabled = false,
+    }))
+
+    local ok, err = api.apply_profile("debug", {
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "serde" }, matched.settings["rust-analyzer"].cargo.features)
+    assert.is_true(matched.settings["rust-analyzer"].cargo.noDefaultFeatures)
+    assert.is_nil(unrelated.notified)
+  end)
+
+  local function capture_reattach()
+    local scheduled = {}
+    local calls = {}
+    vim.defer_fn = function(callback, ms)
+      table.insert(scheduled, { callback = callback, ms = ms })
+    end
+    vim.lsp.buf_detach_client = function(bufnr, client_id)
+      table.insert(calls, { "detach", bufnr, client_id })
+      return true
+    end
+    vim.lsp.buf_attach_client = function(bufnr, client_id)
+      table.insert(calls, { "attach", bufnr, client_id })
+      return true
+    end
+    vim.cmd = function(command)
+      table.insert(calls, { "cmd", command })
+    end
+    return scheduled, calls
+  end
+
+  local function stub_attached_context(path, manifest_data)
+    cargo.find_manifest = function()
+      return path
+    end
+    cargo.load_manifest = function(manifest_path)
+      assert.are.equal(path, manifest_path)
+      return manifest_data or {
+        manifest_path = path,
+        workspace_root = simple_root,
+        package_name = "simple",
+        scope = "package",
+      }
+    end
+  end
+
+  it("apply schedules reattach for loaded Rust buffers attached to updated clients", function()
     local client = make_client(simple_root)
     client.id = 101
     clients = { client }
@@ -841,12 +902,7 @@ describe("rust-analyzer LSP integration", function()
       return { rust_buf, other_rust_buf, lua_buf }
     end
 
-    local refreshed = {}
-    vim.lsp.semantic_tokens = {
-      force_refresh = function(bufnr)
-        table.insert(refreshed, bufnr)
-      end,
-    }
+    local scheduled, calls = capture_reattach()
 
     local ok, err = lsp.apply({ "serde" }, {
       manifest_path = manifest,
@@ -854,11 +910,50 @@ describe("rust-analyzer LSP integration", function()
     })
 
     assert.is_true(ok, err)
-    table.sort(refreshed)
-    assert.are.same(util.unique_sorted({ rust_buf, other_rust_buf }), refreshed)
+    assert.are.equal(2, #scheduled)
+    assert.are.equal(700, scheduled[1].ms)
+
+    scheduled[1].callback()
+    scheduled[2].callback()
+
+    assert.are.same({
+      { "detach", rust_buf, 101 },
+      { "attach", rust_buf, 101 },
+      { "cmd", "redraw!" },
+      { "detach", other_rust_buf, 101 },
+      { "attach", other_rust_buf, 101 },
+      { "cmd", "redraw!" },
+    }, calls)
   end)
 
-  it("apply does not refresh unrelated buffers", function()
+  it("dedupes duplicate reattach buffers for one client", function()
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf, rust_buf }
+    end
+
+    local scheduled, calls = capture_reattach()
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+    }))
+
+    assert.are.equal(1, #scheduled)
+    scheduled[1].callback()
+    assert.are.same({
+      { "detach", rust_buf, 101 },
+      { "attach", rust_buf, 101 },
+      { "cmd", "redraw!" },
+    }, calls)
+  end)
+
+  it("apply does not reattach unrelated buffers", function()
     local client = make_client(simple_root)
     client.id = 101
     clients = { client }
@@ -872,29 +967,66 @@ describe("rust-analyzer LSP integration", function()
       return { rust_buf }
     end
 
-    local refreshed = {}
-    vim.lsp.semantic_tokens = {
-      force_refresh = function(bufnr)
-        table.insert(refreshed, bufnr)
-      end,
-    }
+    local scheduled, calls = capture_reattach()
 
     assert.is_true(lsp.apply({ "serde" }, {
       manifest_path = manifest,
       scope = "package",
     }))
 
-    assert.are.same({ rust_buf }, refreshed)
+    assert.are.equal(1, #scheduled)
+    scheduled[1].callback()
+    assert.are.same({
+      { "detach", rust_buf, 101 },
+      { "attach", rust_buf, 101 },
+      { "cmd", "redraw!" },
+    }, calls)
+    for _, call in ipairs(calls) do
+      assert.are_not.equal(unrelated, call[2])
+    end
   end)
 
-  it("apply failure does not refresh buffers", function()
+  it("apply does not reattach buffers for unrelated clients", function()
+    local matched = make_client(simple_root)
+    matched.id = 101
+    local unrelated = make_client(other_root)
+    unrelated.id = 202
+    clients = { matched, unrelated }
+
+    local matched_buf = vim.api.nvim_create_buf(false, true)
+    local unrelated_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = matched_buf })
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = unrelated_buf })
+
+    vim.lsp.get_buffers_by_client_id = function(client_id)
+      if client_id == 101 then
+        return { matched_buf }
+      end
+      return { unrelated_buf }
+    end
+
+    local scheduled, calls = capture_reattach()
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+    }))
+
+    assert.are.equal(1, #scheduled)
+    scheduled[1].callback()
+    assert.are.same({
+      { "detach", matched_buf, 101 },
+      { "attach", matched_buf, 101 },
+      { "cmd", "redraw!" },
+    }, calls)
+  end)
+
+  it("apply failure does not reattach buffers", function()
     clients = {}
-    local refreshed = false
-    vim.lsp.semantic_tokens = {
-      force_refresh = function()
-        refreshed = true
-      end,
-    }
+    local scheduled = false
+    vim.defer_fn = function()
+      scheduled = true
+    end
 
     local ok = lsp.apply({ "serde" }, {
       manifest_path = manifest,
@@ -902,39 +1034,10 @@ describe("rust-analyzer LSP integration", function()
     })
 
     assert.is_false(ok)
-    assert.is_false(refreshed)
+    assert.is_false(scheduled)
   end)
 
-  it("skips semantic refresh when refresh_after_apply is disabled", function()
-    config.setup({
-      lsp = {
-        refresh_after_apply = false,
-      },
-    })
-    local client = make_client(simple_root)
-    client.id = 101
-    clients = { client }
-    local rust_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
-    vim.lsp.get_buffers_by_client_id = function()
-      return { rust_buf }
-    end
-    local refreshed = false
-    vim.lsp.semantic_tokens = {
-      force_refresh = function()
-        refreshed = true
-      end,
-    }
-
-    assert.is_true(lsp.apply({ "serde" }, {
-      manifest_path = manifest,
-      scope = "package",
-    }))
-
-    assert.is_false(refreshed)
-  end)
-
-  it("treats missing semantic force_refresh as a safe no-op", function()
+  it("treats missing reattach APIs as a safe no-op", function()
     local client = make_client(simple_root)
     client.id = 101
     clients = { client }
@@ -944,9 +1047,11 @@ describe("rust-analyzer LSP integration", function()
       return { rust_buf }
     end
 
-    vim.lsp.semantic_tokens = {
-      start = function() end,
-    }
+    vim.lsp.buf_detach_client = nil
+    local scheduled = false
+    vim.defer_fn = function()
+      scheduled = true
+    end
 
     local ok, err = lsp.apply({ "serde" }, {
       manifest_path = manifest,
@@ -954,10 +1059,11 @@ describe("rust-analyzer LSP integration", function()
     })
 
     assert.is_true(ok, err)
+    assert.is_false(scheduled)
     assert.are.same({ "serde" }, client.settings["rust-analyzer"].cargo.features)
   end)
 
-  it("reset success refreshes affected Rust buffers", function()
+  it("reset success reattaches affected Rust buffers", function()
     local client = make_client(simple_root)
     client.id = 101
     clients = { client }
@@ -967,19 +1073,14 @@ describe("rust-analyzer LSP integration", function()
     vim.lsp.get_buffers_by_client_id = function()
       return { rust_buf }
     end
-    local refreshed = {}
-    vim.lsp.semantic_tokens = {
-      force_refresh = function(bufnr)
-        table.insert(refreshed, bufnr)
-      end,
-    }
+    local scheduled, calls = capture_reattach()
 
     assert.is_true(lsp.apply({ "serde" }, {
       manifest_path = manifest,
       scope = "package",
       remember = true,
     }))
-    refreshed = {}
+    scheduled, calls = capture_reattach()
 
     local ok, err = lsp.reset({
       manifest_path = manifest,
@@ -987,7 +1088,99 @@ describe("rust-analyzer LSP integration", function()
     })
 
     assert.is_true(ok, err)
-    assert.are.same({ rust_buf }, refreshed)
+    assert.are.equal(1, #scheduled)
+    scheduled[1].callback()
+    assert.are.same({
+      { "detach", rust_buf, 101 },
+      { "attach", rust_buf, 101 },
+      { "cmd", "redraw!" },
+    }, calls)
+  end)
+
+  it("reapply_for_client schedules reattach after applying remembered session state", function()
+    state.remember_applied({
+      selected = { "serde" },
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+    local scheduled, calls = capture_reattach()
+
+    lsp.reapply_for_client(client)
+
+    assert.are.same({ "serde" }, client.settings["rust-analyzer"].cargo.features)
+    assert.are.equal(1, #scheduled)
+    scheduled[1].callback()
+    assert.are.same({
+      { "detach", rust_buf, 101 },
+      { "attach", rust_buf, 101 },
+      { "cmd", "redraw!" },
+    }, calls)
+  end)
+
+  it("reapply_for_client does not reattach when current config already matches", function()
+    state.remember_applied({
+      selected = { "serde" },
+      manifest_path = manifest,
+      scope = "package",
+      has_default = true,
+      default_enabled = true,
+    })
+
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "serde" },
+            noDefaultFeatures = false,
+          },
+        },
+      },
+    })
+    client.id = 101
+    clients = { client }
+    local scheduled = capture_reattach()
+
+    lsp.reapply_for_client(client)
+
+    assert.is_nil(client.notified)
+    assert.are.equal(0, #scheduled)
+  end)
+
+  it("reapply_for_client does not reattach when explicit feature config causes skip", function()
+    state.remember_applied({
+      selected = { "serde" },
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "metrics" },
+          },
+        },
+      },
+    })
+    client.id = 101
+    clients = { client }
+    local scheduled = capture_reattach()
+
+    lsp.reapply_for_client(client)
+
+    assert.is_nil(client.notified)
+    assert.are.same({ "metrics" }, client.settings["rust-analyzer"].cargo.features)
+    assert.are.equal(0, #scheduled)
   end)
 
   it("reapplies remembered selections to a new rust-analyzer client", function()
@@ -1020,10 +1213,10 @@ describe("rust-analyzer LSP integration", function()
     assert.is_nil(new_client.notified)
   end)
 
-  it("does not reapply remembered selections when reapply_policy is never", function()
+  it("does not reapply remembered selections when reapply is false", function()
     config.setup({
       lsp = {
-        reapply_policy = "never",
+        reapply = false,
       },
     })
     state.remember_applied({
@@ -1038,7 +1231,310 @@ describe("rust-analyzer LSP integration", function()
     assert.is_nil(client.notified)
   end)
 
-  it("reapplies remembered selections with if_empty when no explicit feature settings exist", function()
+  it("does not apply the default profile on attach by default", function()
+    config.setup()
+    stub_attached_context(manifest)
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = manifest,
+      workspace_root = simple_root,
+      package_name = "simple",
+      scope = "package",
+      features = { "serde" },
+      default_enabled = true,
+    }))
+
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+    local scheduled = capture_reattach()
+
+    local applied = lsp.apply_default_profile_for_client(client, 1)
+
+    assert.is_false(applied)
+    assert.is_nil(client.notified)
+    assert.are.equal(0, #scheduled)
+  end)
+
+  it("applies the default profile on attach when enabled and no explicit config exists", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    stub_attached_context(manifest)
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = manifest,
+      workspace_root = simple_root,
+      package_name = "simple",
+      scope = "package",
+      features = { "serde" },
+      default_enabled = false,
+    }))
+
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+    local scheduled, calls = capture_reattach()
+
+    local applied = lsp.apply_default_profile_for_client(client, rust_buf)
+
+    assert.is_true(applied)
+    assert.are.same({ "serde" }, client.settings["rust-analyzer"].cargo.features)
+    assert.is_true(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
+    assert.are.equal(1, client.notify_count)
+    assert.are.equal(1, #scheduled)
+    assert.are.same({ "serde" }, state.applied()[1].selected)
+
+    scheduled[1].callback()
+    assert.are.same({
+      { "detach", rust_buf, 101 },
+      { "attach", rust_buf, 101 },
+      { "cmd", "redraw!" },
+    }, calls)
+  end)
+
+  it("skips default profile apply on attach when explicit rust-analyzer config exists", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    stub_attached_context(manifest)
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = manifest,
+      workspace_root = simple_root,
+      package_name = "simple",
+      scope = "package",
+      features = { "serde" },
+    }))
+
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "metrics" },
+          },
+        },
+      },
+    })
+    client.id = 101
+    clients = { client }
+    local scheduled = capture_reattach()
+
+    local applied = lsp.apply_default_profile_for_client(client, 1)
+
+    assert.is_false(applied)
+    assert.is_nil(client.notified)
+    assert.are.same({ "metrics" }, client.settings["rust-analyzer"].cargo.features)
+    assert.are.equal(0, #scheduled)
+  end)
+
+  it("skips default profile apply on attach when explicit check feature config exists", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    stub_attached_context(manifest)
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = manifest,
+      workspace_root = simple_root,
+      package_name = "simple",
+      scope = "package",
+      features = { "serde" },
+    }))
+
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {},
+          check = {
+            features = { "metrics" },
+          },
+        },
+      },
+    })
+    client.id = 101
+    clients = { client }
+    local scheduled = capture_reattach()
+
+    local applied = lsp.apply_default_profile_for_client(client, 1)
+
+    assert.is_false(applied)
+    assert.is_nil(client.notified)
+    assert.are.same({ "metrics" }, client.settings["rust-analyzer"].check.features)
+    assert.are.equal(0, #scheduled)
+  end)
+
+  it("does not apply a named profile automatically on attach", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    stub_attached_context(manifest)
+    assert.is_true(profiles.save_profile("debug", {
+      manifest_path = manifest,
+      workspace_root = simple_root,
+      package_name = "simple",
+      scope = "package",
+      features = { "serde" },
+    }))
+
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+    local scheduled = capture_reattach()
+
+    local applied = lsp.apply_default_profile_for_client(client, 1)
+
+    assert.is_false(applied)
+    assert.is_nil(client.notified)
+    assert.are.equal(0, #scheduled)
+  end)
+
+  it("does not apply on attach when the default profile is missing", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    stub_attached_context(manifest)
+
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+    local scheduled = capture_reattach()
+
+    local applied = lsp.apply_default_profile_for_client(client, 1)
+
+    assert.is_false(applied)
+    assert.is_nil(client.notified)
+    assert.are.equal(0, #scheduled)
+  end)
+
+  it("dedupes default profile apply per attached client context", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    stub_attached_context(manifest)
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = manifest,
+      workspace_root = simple_root,
+      package_name = "simple",
+      scope = "package",
+      features = { "serde" },
+    }))
+
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+    local scheduled = capture_reattach()
+
+    assert.is_true(lsp.apply_default_profile_for_client(client, rust_buf))
+    assert.is_false(lsp.apply_default_profile_for_client(client, rust_buf))
+
+    assert.are.equal(1, client.notify_count)
+    assert.are.equal(1, #scheduled)
+  end)
+
+  it("uses a workspace default profile on attach when no package default profile exists", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    local member_manifest = vim.fs.joinpath(workspace_root, "crates", "a", "Cargo.toml")
+    stub_attached_context(member_manifest, {
+      manifest_path = member_manifest,
+      workspace_root = workspace_root,
+      package_name = "a",
+      scope = "package",
+    })
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = vim.fs.joinpath(workspace_root, "Cargo.toml"),
+      workspace_root = workspace_root,
+      scope = "workspace",
+      features = { "a/foo" },
+    }))
+
+    local client = make_client(workspace_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+    local scheduled = capture_reattach()
+
+    local applied = lsp.apply_default_profile_for_client(client, rust_buf)
+
+    assert.is_true(applied)
+    assert.are.same({ "a/foo" }, client.settings["rust-analyzer"].cargo.features)
+    assert.are.equal("workspace", state.applied()[1].scope)
+    assert.are.equal(1, #scheduled)
+  end)
+
+  it("prefers package default profile over workspace default profile on attach", function()
+    config.setup({
+      persistence = {
+        apply_on_attach = true,
+      },
+    })
+    local member_manifest = vim.fs.joinpath(workspace_root, "crates", "a", "Cargo.toml")
+    stub_attached_context(member_manifest, {
+      manifest_path = member_manifest,
+      workspace_root = workspace_root,
+      package_name = "a",
+      scope = "package",
+    })
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = member_manifest,
+      workspace_root = workspace_root,
+      package_name = "a",
+      scope = "package",
+      features = { "a/foo" },
+    }))
+    assert.is_true(profiles.save_profile(nil, {
+      manifest_path = vim.fs.joinpath(workspace_root, "Cargo.toml"),
+      workspace_root = workspace_root,
+      scope = "workspace",
+      features = { "b/bar" },
+    }))
+
+    local client = make_client(workspace_root)
+    client.id = 101
+    clients = { client }
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+
+    local applied = lsp.apply_default_profile_for_client(client, rust_buf)
+
+    assert.is_true(applied)
+    assert.are.same({ "a/foo" }, client.settings["rust-analyzer"].cargo.features)
+    assert.are.equal("package", state.applied()[1].scope)
+  end)
+
+  it("reapplies remembered selections when reapply is enabled and no explicit feature settings exist", function()
     state.remember_applied({
       selected = { "serde" },
       manifest_path = manifest,
@@ -1055,7 +1551,7 @@ describe("rust-analyzer LSP integration", function()
     assert.are.equal(1, client.notify_count)
   end)
 
-  it("skips if_empty reapply and notifies once when explicit cargo.features differs", function()
+  it("skips session reapply and notifies once when explicit cargo.features differs", function()
     state.remember_applied({
       selected = { "serde" },
       manifest_path = manifest,
@@ -1083,10 +1579,10 @@ describe("rust-analyzer LSP integration", function()
     assert.matches("explicit Cargo feature settings", notifications[1].message)
   end)
 
-  it("does not overwrite explicit cargo.features when reapply_policy is invalid", function()
+  it("does not overwrite explicit cargo.features when old reapply_policy config is provided", function()
     config.setup({
       lsp = {
-        reapply_policy = "if-empty",
+        reapply_policy = "always",
       },
     })
     state.remember_applied({
@@ -1114,7 +1610,7 @@ describe("rust-analyzer LSP integration", function()
     assert.matches("explicit Cargo feature settings", notifications[1].message)
   end)
 
-  it("skips if_empty reapply without warning when explicit cargo.features is equivalent", function()
+  it("skips session reapply without warning when explicit cargo.features is equivalent", function()
     state.remember_applied({
       selected = { "serde", "metrics" },
       manifest_path = manifest,
@@ -1142,48 +1638,7 @@ describe("rust-analyzer LSP integration", function()
     assert.is_false(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
   end)
 
-  it("overwrites explicit cargo.features when reapply_policy is always", function()
-    config.setup({
-      lsp = {
-        reapply_policy = "always",
-      },
-    })
-    state.remember_applied({
-      selected = { "serde" },
-      manifest_path = manifest,
-      scope = "package",
-      has_default = true,
-      default_enabled = false,
-    })
-
-    local client = make_client(simple_root, {
-      settings = {
-        ["rust-analyzer"] = {
-          cargo = {
-            features = { "metrics" },
-            noDefaultFeatures = false,
-          },
-        },
-      },
-    })
-
-    lsp.reapply_for_client(client)
-
-    assert.are.same({ "serde" }, client.settings["rust-analyzer"].cargo.features)
-    assert.is_true(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
-    assert.are.equal(1, client.notify_count)
-    assert.are.equal(0, #notifications)
-  end)
-
-  it("can use cargo.features all only when explicitly configured and workspace-scoped", function()
-    config.setup({
-      lsp = {
-        notify = true,
-        sync_check_features = "if_set",
-        use_all_features_token = true,
-      },
-    })
-
+  it("uses explicit feature lists for workspace apply", function()
     local client = make_client(workspace_root)
     clients = { client }
 
@@ -1191,11 +1646,10 @@ describe("rust-analyzer LSP integration", function()
       manifest_path = vim.fs.joinpath(workspace_root, "Cargo.toml"),
       scope = "workspace",
       all_enabled = true,
-      allow_all_features_token = true,
     })
 
     assert.is_true(ok, err)
-    assert.are.equal("all", client.settings["rust-analyzer"].cargo.features)
+    assert.are.same({ "a/bar", "a/foo" }, client.settings["rust-analyzer"].cargo.features)
   end)
 
   it("merges remembered member selections in one workspace", function()
@@ -1315,13 +1769,6 @@ describe("rust-analyzer LSP integration", function()
   end)
 
   it("does not emit all during reapply for member selections", function()
-    config.setup({
-      lsp = {
-        notify = true,
-        sync_check_features = "if_set",
-        use_all_features_token = true,
-      },
-    })
     state.remember_applied({
       selected = { "a/foo" },
       manifest_path = vim.fs.joinpath(workspace_root, "crates", "a", "Cargo.toml"),
@@ -1329,7 +1776,6 @@ describe("rust-analyzer LSP integration", function()
       package_name = "a",
       scope = "package",
       all_enabled = true,
-      allow_all_features_token = true,
     })
     state.remember_applied({
       selected = { "b/bar" },
@@ -1338,7 +1784,6 @@ describe("rust-analyzer LSP integration", function()
       package_name = "b",
       scope = "package",
       all_enabled = true,
-      allow_all_features_token = true,
     })
 
     local client = make_client(workspace_root)
@@ -1348,20 +1793,12 @@ describe("rust-analyzer LSP integration", function()
   end)
 
   it("does not collapse mixed remembered workspace and member selections to all", function()
-    config.setup({
-      lsp = {
-        notify = true,
-        sync_check_features = "if_set",
-        use_all_features_token = true,
-      },
-    })
     state.remember_applied({
       selected = { "a/foo", "b/bar" },
       manifest_path = vim.fs.joinpath(workspace_root, "Cargo.toml"),
       workspace_root = workspace_root,
       scope = "workspace",
       all_enabled = true,
-      allow_all_features_token = true,
     })
     state.remember_applied({
       selected = { "a/foo" },
@@ -1377,27 +1814,19 @@ describe("rust-analyzer LSP integration", function()
     assert.are.same({ "a/foo", "b/bar" }, client.settings["rust-analyzer"].cargo.features)
   end)
 
-  it("can reapply all for one unambiguous workspace all selection", function()
-    config.setup({
-      lsp = {
-        notify = true,
-        sync_check_features = "if_set",
-        use_all_features_token = true,
-      },
-    })
+  it("reapplies a workspace all selection as an explicit feature list", function()
     state.remember_applied({
       selected = { "a/foo", "b/bar" },
       manifest_path = vim.fs.joinpath(workspace_root, "Cargo.toml"),
       workspace_root = workspace_root,
       scope = "workspace",
       all_enabled = true,
-      allow_all_features_token = true,
     })
 
     local client = make_client(workspace_root)
     lsp.reapply_for_client(client)
 
-    assert.are.equal("all", client.settings["rust-analyzer"].cargo.features)
+    assert.are.same({ "a/foo", "b/bar" }, client.settings["rust-analyzer"].cargo.features)
   end)
 
   it("does not set noDefaultFeatures for workspace member applies", function()
