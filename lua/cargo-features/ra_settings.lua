@@ -4,6 +4,97 @@ local util = require("cargo-features.util")
 local M = {}
 
 local UNSET = {}
+local owned_overrides = {}
+
+---@param client vim.lsp.Client
+---@return string
+local function client_key(client)
+  return tostring(client.id or client)
+end
+
+---@param opts CargoFeaturesApplyOptions|CargoFeaturesResetOptions
+---@return string
+local function context_key(opts)
+  if opts.workspace_root and opts.workspace_root ~= "" then
+    return util.abspath(opts.workspace_root)
+  end
+  if opts.manifest_path and opts.manifest_path ~= "" then
+    return util.abspath(opts.manifest_path)
+  end
+  return "__global__"
+end
+
+---@param value any
+---@return any
+local function snapshot_value(value)
+  if value == nil then
+    return UNSET
+  end
+  return vim.deepcopy(value)
+end
+
+---@param target table
+---@param key string
+---@param value any
+local function restore_value(target, key, value)
+  if value == UNSET then
+    target[key] = nil
+  else
+    target[key] = vim.deepcopy(value)
+  end
+end
+
+---@param value any
+---@return boolean
+local function is_empty_table(value)
+  return type(value) == "table" and next(value) == nil
+end
+
+---@param client vim.lsp.Client
+---@param opts CargoFeaturesApplyOptions
+local function remember_original_settings(client, opts)
+  local per_client = owned_overrides[client_key(client)] or {}
+  owned_overrides[client_key(client)] = per_client
+
+  local key = context_key(opts)
+  if per_client[key] then
+    return
+  end
+
+  local ra = M.settings(client) or {}
+  local cargo = type(ra.cargo) == "table" and ra.cargo or {}
+  local check = type(ra.check) == "table" and ra.check or {}
+
+  per_client[key] = {
+    check_exists = type(ra.check) == "table",
+    cargo_features = snapshot_value(cargo.features),
+    cargo_no_default = snapshot_value(cargo.noDefaultFeatures),
+    cargo_all_features = snapshot_value(cargo.allFeatures),
+    check_features = snapshot_value(check.features),
+    check_no_default = snapshot_value(check.noDefaultFeatures),
+  }
+end
+
+---@param client vim.lsp.Client
+---@param opts CargoFeaturesResetOptions
+---@return table?
+local function original_settings(client, opts)
+  local per_client = owned_overrides[client_key(client)]
+  return per_client and per_client[context_key(opts)] or nil
+end
+
+---@param client vim.lsp.Client
+---@param opts CargoFeaturesResetOptions
+local function clear_original_settings(client, opts)
+  local per_client = owned_overrides[client_key(client)]
+  if not per_client then
+    return
+  end
+  per_client[context_key(opts)] = nil
+  if vim.tbl_isempty(per_client) then
+    owned_overrides[client_key(client)] = nil
+  end
+end
 
 ---@param client vim.lsp.Client
 ---@return table
@@ -209,6 +300,8 @@ end
 ---@param selected string[]
 ---@param opts CargoFeaturesApplyOptions
 function M.apply(client, selected, opts)
+  remember_original_settings(client, opts)
+
   local cargo_features = M.resolve_cargo_features(selected, opts)
   local settings = M.ensure_settings(client)
   local ra = settings["rust-analyzer"]
@@ -249,6 +342,83 @@ function M.apply(client, selected, opts)
   if config.get().lsp.notify then
     client:notify("workspace/didChangeConfiguration", { settings = settings })
   end
+end
+
+---@class CargoFeaturesResetOptions
+---@field bufnr? integer
+---@field manifest_path? string
+---@field workspace_root? string
+---@field package_name? string
+---@field scope? "package"|"workspace"
+---@field allow_global? boolean
+---@field force? boolean
+
+---@param client vim.lsp.Client
+---@param opts CargoFeaturesResetOptions
+---@return boolean ok
+---@return string? err
+function M.reset(client, opts)
+  opts = opts or {}
+  local original = original_settings(client, opts)
+  if not original and opts.force ~= true then
+    return false,
+      "No plugin-applied Cargo feature override is remembered for this rust-analyzer client; use force to clear live settings anyway"
+  end
+
+  local settings = M.ensure_settings(client)
+  local ra = settings["rust-analyzer"]
+  ra.cargo = ra.cargo or {}
+
+  if original then
+    restore_value(ra.cargo, "features", original.cargo_features)
+    restore_value(ra.cargo, "noDefaultFeatures", original.cargo_no_default)
+    restore_value(ra.cargo, "allFeatures", original.cargo_all_features)
+
+    if original.check_exists then
+      ra.check = ra.check or {}
+      restore_value(ra.check, "features", original.check_features)
+      restore_value(ra.check, "noDefaultFeatures", original.check_no_default)
+    elseif type(ra.check) == "table" then
+      ra.check.features = nil
+      ra.check.noDefaultFeatures = nil
+      if is_empty_table(ra.check) then
+        ra.check = nil
+      end
+    end
+  else
+    ra.cargo.features = nil
+    ra.cargo.noDefaultFeatures = nil
+    ra.cargo.allFeatures = nil
+
+    if config.get().lsp.sync_check_features == "always" then
+      if type(ra.check) == "table" then
+        ra.check.features = nil
+        ra.check.noDefaultFeatures = nil
+      end
+      if is_empty_table(ra.check) then
+        ra.check = nil
+      end
+    end
+  end
+
+  clear_original_settings(client, opts)
+
+  if config.get().lsp.notify then
+    client:notify("workspace/didChangeConfiguration", { settings = settings })
+  end
+
+  return true, nil
+end
+
+---@param client vim.lsp.Client
+---@param opts CargoFeaturesResetOptions
+---@return boolean
+function M.has_owned_override(client, opts)
+  return original_settings(client, opts or {}) ~= nil
+end
+
+function M._clear_owned_overrides()
+  owned_overrides = {}
 end
 
 return M

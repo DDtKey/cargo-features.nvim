@@ -17,6 +17,7 @@ local M = {}
 ---@class CargoFeaturesLspConfig
 ---@field notify boolean Send workspace/didChangeConfiguration after updating client settings.
 ---@field reapply_policy "never"|"if_empty"|"always" Control automatic restart/LspAttach recovery.
+---@field refresh_after_apply boolean Request semantic-token refresh for loaded Rust buffers attached to updated clients.
 ---@field sync_check_features "never"|"if_set"|"always" Keep rust-analyzer.check.* aligned.
 ---@field use_all_features_token boolean Use cargo.features = "all" only for explicitly workspace-scoped apply calls.
 
@@ -55,6 +56,7 @@ M.defaults = {
   lsp = {
     notify = true,
     reapply_policy = "if_empty",
+    refresh_after_apply = true,
     sync_check_features = "if_set",
     use_all_features_token = false,
   },
@@ -78,6 +80,7 @@ M.defaults = {
       toggle = { "<CR>", " " },
       toggle_all = "A",
       apply = "W",
+      reset = "R",
       close = { "q", "<Esc>" },
     },
     title = "Cargo Features",
@@ -96,6 +99,10 @@ function M.setup(opts)
   local reapply_policy = M.options.lsp.reapply_policy
   if reapply_policy ~= "never" and reapply_policy ~= "if_empty" and reapply_policy ~= "always" then
     M.options.lsp.reapply_policy = "if_empty"
+  end
+
+  if type(M.options.lsp.refresh_after_apply) ~= "boolean" then
+    M.options.lsp.refresh_after_apply = true
   end
 
   local auto_load = M.options.persistence.auto_load

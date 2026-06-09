@@ -264,6 +264,83 @@ end
 ---@field allow_all_features_token? boolean
 ---@field remember? boolean
 
+---@class CargoFeaturesResetOptions
+---@field bufnr? integer
+---@field manifest_path? string
+---@field workspace_root? string
+---@field package_name? string
+---@field scope? "package"|"workspace"
+---@field allow_global? boolean
+---@field force? boolean
+
+---@param client vim.lsp.Client
+---@return integer[]
+local function rust_buffers_for_client(client)
+  if not client.id then
+    return {}
+  end
+
+  local bufnrs = {}
+  if type(vim.lsp.get_buffers_by_client_id) == "function" then
+    local ok, attached = pcall(vim.lsp.get_buffers_by_client_id, client.id)
+    if ok and type(attached) == "table" then
+      bufnrs = attached
+    end
+  end
+
+  if #bufnrs == 0 then
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_loaded(bufnr) then
+        local clients = rust_analyzer_clients({ bufnr = bufnr })
+        for _, attached in ipairs(clients) do
+          if attached.id == client.id then
+            table.insert(bufnrs, bufnr)
+            break
+          end
+        end
+      end
+    end
+  end
+
+  local rust = {}
+  for _, bufnr in ipairs(bufnrs) do
+    if
+      vim.api.nvim_buf_is_valid(bufnr)
+      and vim.api.nvim_buf_is_loaded(bufnr)
+      and vim.api.nvim_get_option_value("filetype", { buf = bufnr }) == "rust"
+    then
+      table.insert(rust, bufnr)
+    end
+  end
+  return util.unique_sorted(rust)
+end
+
+---@param clients vim.lsp.Client[]
+function M.refresh_after_apply(clients)
+  if not config.get().lsp.refresh_after_apply then
+    return
+  end
+
+  local semantic = vim.lsp.semantic_tokens
+  if type(semantic) ~= "table" then
+    return
+  end
+
+  local refreshed = {}
+  for _, client in ipairs(clients) do
+    if client.id then
+      if type(semantic.force_refresh) == "function" then
+        for _, bufnr in ipairs(rust_buffers_for_client(client)) do
+          if not refreshed[bufnr] then
+            refreshed[bufnr] = true
+            pcall(semantic.force_refresh, bufnr)
+          end
+        end
+      end
+    end
+  end
+end
+
 ---@param entry CargoFeaturesAppliedSelection
 ---@return string
 local function workspace_key(entry)
@@ -365,6 +442,54 @@ function M.apply(selected, opts)
     ra_settings.apply(client, effective_selected, effective_opts)
   end
 
+  M.refresh_after_apply(clients)
+
+  return true, nil
+end
+
+---@param opts? CargoFeaturesResetOptions
+---@return boolean ok
+---@return string? err
+function M.reset(opts)
+  opts = opts or {}
+  local clients = M.get_clients({
+    bufnr = opts.bufnr,
+    manifest_path = opts.manifest_path,
+    allow_global = opts.allow_global,
+  })
+  if #clients == 0 then
+    return false, M.no_client_error({
+      bufnr = opts.bufnr,
+      manifest_path = opts.manifest_path,
+      allow_global = opts.allow_global,
+    })
+  end
+
+  local any_reset = false
+  local errors = {}
+  local reset_clients = {}
+  for _, client in ipairs(clients) do
+    local ok, err = ra_settings.reset(client, opts)
+    if ok then
+      any_reset = true
+      table.insert(reset_clients, client)
+    elseif err then
+      table.insert(errors, err)
+    end
+  end
+
+  if not any_reset then
+    return false, errors[1] or "No plugin-applied Cargo feature override is remembered"
+  end
+
+  if opts.manifest_path then
+    state.forget_applied({
+      manifest_path = opts.manifest_path,
+      workspace_root = opts.workspace_root,
+    })
+  end
+
+  M.refresh_after_apply(reset_clients)
   return true, nil
 end
 
@@ -523,6 +648,8 @@ end
 function M._clear_reapplied_clients()
   reapplied_clients = {}
 end
+
+M._rust_buffers_for_client = rust_buffers_for_client
 
 function M.create_autocmd()
   if autocmd_created then

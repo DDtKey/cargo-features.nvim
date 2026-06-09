@@ -26,6 +26,11 @@ COMMANDS                                      *cargo-features-commands*
     Print active rust-analyzer clients, attachment state, roots, workspace
     folders, and whether each client covers the current Cargo manifest.
 
+:CargoFeaturesReset
+    Reset plugin-applied Cargo feature overrides for the nearest Cargo.toml.
+    Use :CargoFeaturesReset! to force clearing matching live Cargo feature
+    settings when no plugin-owned override is remembered.
+
 ==============================================================================
 LUA API                                          *cargo-features-api*
 
@@ -51,6 +56,21 @@ require("cargo-features").apply({features}, {opts})   *cargo-features.apply()*
                                   explicitly true.
       allow_all_features_token    Allow cargo.features = "all" when config,
                                   scope, and all_enabled also permit it.
+
+require("cargo-features").reset({opts})          *cargo-features.reset()*
+    Reset plugin-applied Cargo feature overrides for matching rust-analyzer
+    clients. This removes the live override instead of applying an empty
+    feature list. The current buffer and nearest Cargo.toml are used when opts
+    does not provide a bufnr or manifest_path.
+
+    opts:
+      bufnr                       Buffer used to find attached clients.
+      manifest_path               Cargo.toml path used to scope clients.
+      workspace_root              Cargo workspace root, when known.
+      scope                       "package" or "workspace".
+      force                       Clear matching live Cargo feature settings
+                                  even when no plugin-owned override is
+                                  remembered.
 
 require("cargo-features").save_profile({name}, {opts})   *cargo-features.save_profile()*
     Experimental pre-1.0 helper. Save a named profile when persistence.enabled
@@ -89,6 +109,7 @@ require("cargo-features").setup({
   lsp = {
     notify = true,
     reapply_policy = "if_empty",
+    refresh_after_apply = true,
     sync_check_features = "if_set",
     use_all_features_token = false,
   },
@@ -114,6 +135,7 @@ require("cargo-features").setup({
       toggle = { "<CR>", " " },
       toggle_all = "A",
       apply = "W",
+      reset = "R",
       close = { "q", "<Esc>" },
     },
   },
@@ -138,6 +160,12 @@ LSP options:
         "if_empty" Reapply only when the client has no explicit Cargo feature
                    settings.
         "always"   Reapply remembered plugin state even over explicit settings.
+
+  refresh_after_apply
+      true by default. After apply/reset, request a semantic-token refresh when
+      supported by Neovim. This is best-effort and scoped to currently loaded
+      Rust buffers attached to the rust-analyzer clients that were updated. It
+      does not reload buffers, open unloaded buffers, or restart rust-analyzer.
 
   sync_check_features
       "if_set" preserves rust-analyzer's inheritance by only updating
@@ -171,6 +199,16 @@ Runtime behavior:
   memory and reapplies it when a matching rust-analyzer client attaches later
   in the same Neovim session. Lua callers should pass remember = true when they
   want this behavior.
+
+  Unchecking every feature applies an explicit empty feature set. Reset is
+  different: it removes the plugin-applied override and lets rust-analyzer use
+  Cargo.toml/default Cargo behavior again.
+
+  :CargoFeaturesReset clears plugin-applied live overrides remembered in the
+  current Neovim session and does not delete disk profiles.
+  :CargoFeaturesReset! can clear matching live Cargo feature settings without
+  an ownership record. Reset restores check settings the plugin changed; forced
+  reset clears check settings only when lsp.sync_check_features = "always".
 
   Live rust-analyzer settings are the source of truth while a client is
   attached. In-memory state is only restart/LspAttach recovery.

@@ -9,7 +9,7 @@ local function validate(root, manifest, source, feature)
 
   local bufnr = vim.api.nvim_get_current_buf()
   local client_id = vim.lsp.start({
-    name = "rust_analyzer",
+    name = "rust-analyzer",
     cmd = { "rust-analyzer" },
     capabilities = {
       workspace = {

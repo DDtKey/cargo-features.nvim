@@ -12,6 +12,18 @@ function M.create()
   end, {
     desc = "Show rust-analyzer client matching details",
   })
+
+  vim.api.nvim_create_user_command("CargoFeaturesReset", function(opts)
+    local ok, err = require("cargo-features").reset({ force = opts.bang })
+    if ok then
+      require("cargo-features.util").notify("Reset Cargo feature overrides for rust-analyzer")
+    else
+      require("cargo-features.util").notify(err or "Unable to reset Cargo feature overrides", vim.log.levels.ERROR)
+    end
+  end, {
+    bang = true,
+    desc = "Reset plugin-applied Cargo feature overrides for rust-analyzer",
+  })
 end
 
 return M

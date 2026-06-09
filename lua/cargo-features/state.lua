@@ -61,4 +61,19 @@ function M.clear_applied()
   applied = {}
 end
 
+---@param opts { manifest_path?: string, workspace_root?: string }
+function M.forget_applied(opts)
+  if not opts or not opts.manifest_path then
+    return
+  end
+
+  local key = opts.workspace_root and util.abspath(opts.workspace_root) or util.abspath(opts.manifest_path)
+  for entry_key, entry in pairs(applied) do
+    local entry_workspace = entry.workspace_root and util.abspath(entry.workspace_root) or util.abspath(entry.manifest_path)
+    if entry_workspace == key then
+      applied[entry_key] = nil
+    end
+  end
+end
+
 return M

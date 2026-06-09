@@ -11,6 +11,8 @@ describe("floating window UI", function()
   local original_load_manifest_async
   local original_lsp_get_clients
   local original_lsp_enabled_features
+  local original_lsp_reset
+  local original_notify
   local original_columns
   local original_lines
   local original_xdg_state_home
@@ -21,6 +23,8 @@ describe("floating window UI", function()
     original_load_manifest_async = cargo.load_manifest_async
     original_lsp_get_clients = lsp.get_clients
     original_lsp_enabled_features = lsp.enabled_features
+    original_lsp_reset = lsp.reset
+    original_notify = vim.notify
     original_columns = vim.o.columns
     original_lines = vim.o.lines
     original_xdg_state_home = vim.env.XDG_STATE_HOME
@@ -29,6 +33,7 @@ describe("floating window UI", function()
     vim.fn.mkdir(state_home, "p")
     vim.env.XDG_STATE_HOME = state_home
     profiles._reset_for_tests()
+    vim.notify = function() end
   end)
 
   after_each(function()
@@ -36,6 +41,8 @@ describe("floating window UI", function()
     cargo.load_manifest_async = original_load_manifest_async
     lsp.get_clients = original_lsp_get_clients
     lsp.enabled_features = original_lsp_enabled_features
+    lsp.reset = original_lsp_reset
+    vim.notify = original_notify
     profiles._reset_for_tests()
     config.setup()
     vim.env.XDG_STATE_HOME = original_xdg_state_home
@@ -123,6 +130,7 @@ describe("floating window UI", function()
       "Enter/Space  Toggle",
       "A            All",
       "W            Apply",
+      "R            Reset",
       "q/Esc        Close",
     }, ui._help_lines(60))
   end)
@@ -134,6 +142,7 @@ describe("floating window UI", function()
           toggle = "t",
           toggle_all = "!",
           apply = "a",
+          reset = "r",
           close = "x",
         },
       },
@@ -143,6 +152,7 @@ describe("floating window UI", function()
       "t  Toggle",
       "!  All",
       "a  Apply",
+      "r  Reset",
       "x  Close",
     }, ui._help_lines(60))
   end)
@@ -154,6 +164,7 @@ describe("floating window UI", function()
       "Enter/Space Toggle",
       "A All",
       "W Apply",
+      "R Reset",
       "q/Esc Close",
     }, ui._help_lines(12))
   end)
@@ -192,6 +203,24 @@ describe("floating window UI", function()
 
     local after = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, -1, false)
     assert.are.equal("☐ serde", after[1])
+  end)
+
+  it("reset key calls reset for the current manifest", function()
+    stub_manifest()
+    require("cargo-features").setup()
+
+    local reset_opts
+    lsp.reset = function(opts)
+      reset_opts = opts
+      return true
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_feedkeys("R", "x", false)
+
+    assert.are.equal(simple_manifest, reset_opts.manifest_path)
+    assert.are.equal("simple", reset_opts.package_name)
+    assert.are.equal("package", reset_opts.scope)
   end)
 
   it("keeps live rust-analyzer state on open by default even when a profile exists", function()

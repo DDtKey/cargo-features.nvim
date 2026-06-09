@@ -1,6 +1,9 @@
 local config = require("cargo-features.config")
 local lsp = require("cargo-features.lsp")
+local profiles = require("cargo-features.profile_store")
+local ra_settings = require("cargo-features.ra_settings")
 local state = require("cargo-features.state")
+local util = require("cargo-features.util")
 
 local cwd = vim.uv.cwd()
 local simple_root = vim.fs.joinpath(cwd, "tests", "fixtures", "simple")
@@ -39,10 +42,14 @@ end
 describe("rust-analyzer LSP integration", function()
   local original_get_clients
   local original_cmd
+  local original_get_buffers_by_client_id
   local original_notify
+  local original_semantic_tokens
+  local original_xdg_state_home
   local clients
   local notifications
   local restart_called
+  local state_home
 
   before_each(function()
     config.setup({
@@ -56,10 +63,18 @@ describe("rust-analyzer LSP integration", function()
 
     original_get_clients = vim.lsp.get_clients
     original_cmd = vim.cmd
+    original_get_buffers_by_client_id = vim.lsp.get_buffers_by_client_id
     original_notify = vim.notify
+    original_semantic_tokens = vim.lsp.semantic_tokens
+    original_xdg_state_home = vim.env.XDG_STATE_HOME
     clients = {}
     notifications = {}
     restart_called = false
+    state_home = vim.fs.joinpath(vim.uv.cwd(), ".tmp", "lsp-state-spec")
+    vim.fn.delete(state_home, "rf")
+    vim.fn.mkdir(state_home, "p")
+    vim.env.XDG_STATE_HOME = state_home
+    profiles._reset_for_tests()
 
     vim.lsp.get_clients = function(opts)
       opts = opts or {}
@@ -99,9 +114,16 @@ describe("rust-analyzer LSP integration", function()
   after_each(function()
     vim.lsp.get_clients = original_get_clients
     vim.cmd = original_cmd
+    vim.lsp.get_buffers_by_client_id = original_get_buffers_by_client_id
     vim.notify = original_notify
+    vim.lsp.semantic_tokens = original_semantic_tokens
+    vim.env.XDG_STATE_HOME = original_xdg_state_home
+    vim.fn.delete(state_home, "rf")
+    profiles._reset_for_tests()
     state.clear_applied()
     lsp._clear_reapplied_clients()
+    ra_settings._clear_owned_overrides()
+    pcall(vim.cmd, "silent! %bwipeout!")
   end)
 
   it("writes settings to client.settings and mirrors client.config.settings", function()
@@ -472,6 +494,500 @@ describe("rust-analyzer LSP integration", function()
 
     assert.is_true(ok, err)
     assert.are.equal(0, #state.applied())
+  end)
+
+  it("resets plugin-applied cargo feature overrides without applying an empty list", function()
+    local client = make_client(simple_root)
+    clients = { client }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      has_default = true,
+      default_enabled = false,
+      package_name = "simple",
+      scope = "package",
+      remember = true,
+    }))
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      package_name = "simple",
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.is_nil(client.settings["rust-analyzer"].cargo.features)
+    assert.is_nil(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
+    assert.are.equal(2, client.notify_count)
+    assert.are.equal(0, #state.applied())
+  end)
+
+  it("reset restores pre-existing explicit rust-analyzer feature settings", function()
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "from-config" },
+            noDefaultFeatures = false,
+          },
+        },
+      },
+    })
+    clients = { client }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      has_default = true,
+      default_enabled = false,
+      scope = "package",
+      remember = true,
+    }))
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "from-config" }, client.settings["rust-analyzer"].cargo.features)
+    assert.is_false(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
+  end)
+
+  it("reset refuses to clear settings without plugin ownership unless forced", function()
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "from-config" },
+          },
+        },
+      },
+    })
+    clients = { client }
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_false(ok)
+    assert.matches("No plugin%-applied", err)
+    assert.are.same({ "from-config" }, client.settings["rust-analyzer"].cargo.features)
+    assert.is_nil(client.notified)
+  end)
+
+  it("forced reset clears matching live cargo overrides", function()
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "from-config" },
+            noDefaultFeatures = true,
+            allFeatures = true,
+          },
+        },
+      },
+    })
+    clients = { client }
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+      force = true,
+    })
+
+    assert.is_true(ok, err)
+    assert.is_nil(client.settings["rust-analyzer"].cargo.features)
+    assert.is_nil(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
+    assert.is_nil(client.settings["rust-analyzer"].cargo.allFeatures)
+  end)
+
+  it("reset respects manifest client matching", function()
+    local matched = make_client(simple_root)
+    local unrelated = make_client(other_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "keep" },
+          },
+        },
+      },
+    })
+    clients = { matched, unrelated }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+      remember = true,
+    }))
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.is_nil(matched.settings["rust-analyzer"].cargo.features)
+    assert.are.same({ "keep" }, unrelated.settings["rust-analyzer"].cargo.features)
+    assert.is_nil(unrelated.notified)
+  end)
+
+  it("reset restores check settings previously synced by the plugin", function()
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {},
+          check = {
+            features = { "check-config" },
+            noDefaultFeatures = false,
+          },
+        },
+      },
+    })
+    clients = { client }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      has_default = true,
+      default_enabled = false,
+      scope = "package",
+      remember = true,
+    }))
+    assert.are.same({ "serde" }, client.settings["rust-analyzer"].check.features)
+    assert.is_true(client.settings["rust-analyzer"].check.noDefaultFeatures)
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "check-config" }, client.settings["rust-analyzer"].check.features)
+    assert.is_false(client.settings["rust-analyzer"].check.noDefaultFeatures)
+  end)
+
+  it("normal reset clears plugin-created check settings when sync_check_features is always", function()
+    config.setup({
+      lsp = {
+        sync_check_features = "always",
+      },
+    })
+    local client = make_client(simple_root)
+    clients = { client }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      has_default = true,
+      default_enabled = false,
+      scope = "package",
+      remember = true,
+    }))
+    assert.are.same({ "serde" }, client.settings["rust-analyzer"].check.features)
+    assert.is_true(client.settings["rust-analyzer"].check.noDefaultFeatures)
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.is_nil(client.settings["rust-analyzer"].check)
+  end)
+
+  it("normal reset restores original check settings when sync_check_features is always", function()
+    config.setup({
+      lsp = {
+        sync_check_features = "always",
+      },
+    })
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {},
+          check = {
+            features = { "check-config" },
+            noDefaultFeatures = false,
+          },
+        },
+      },
+    })
+    clients = { client }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      has_default = true,
+      default_enabled = false,
+      scope = "package",
+      remember = true,
+    }))
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "check-config" }, client.settings["rust-analyzer"].check.features)
+    assert.is_false(client.settings["rust-analyzer"].check.noDefaultFeatures)
+  end)
+
+  it("forced reset clears check settings only when sync_check_features is always", function()
+    config.setup({
+      lsp = {
+        sync_check_features = "always",
+      },
+    })
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "from-config" },
+          },
+          check = {
+            features = { "from-config" },
+            noDefaultFeatures = true,
+          },
+        },
+      },
+    })
+    clients = { client }
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+      force = true,
+    })
+
+    assert.is_true(ok, err)
+    local check = client.settings["rust-analyzer"].check or {}
+    assert.is_nil(check.features)
+    assert.is_nil(check.noDefaultFeatures)
+  end)
+
+  it("forced reset keeps check settings when sync_check_features is if_set", function()
+    local client = make_client(simple_root, {
+      settings = {
+        ["rust-analyzer"] = {
+          cargo = {
+            features = { "from-config" },
+          },
+          check = {
+            features = { "from-config" },
+            noDefaultFeatures = true,
+          },
+        },
+      },
+    })
+    clients = { client }
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+      force = true,
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "from-config" }, client.settings["rust-analyzer"].check.features)
+    assert.is_true(client.settings["rust-analyzer"].check.noDefaultFeatures)
+  end)
+
+  it("reset does not delete disk profiles", function()
+    local client = make_client(simple_root)
+    clients = { client }
+    config.setup({
+      persistence = {
+        enabled = true,
+      },
+    })
+    assert.is_true(profiles.save_profile("default", {
+      manifest_path = manifest,
+      scope = "package",
+      features = { "serde" },
+      default_enabled = true,
+    }))
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+      remember = true,
+    }))
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    local profile = profiles.load_profile("default", {
+      manifest_path = manifest,
+      scope = "package",
+    })
+    assert.are.same({ "serde" }, profile.features)
+  end)
+
+  it("apply success refreshes loaded Rust buffers attached to updated clients", function()
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    local other_rust_buf = vim.api.nvim_create_buf(false, true)
+    local lua_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = other_rust_buf })
+    vim.api.nvim_set_option_value("filetype", "lua", { buf = lua_buf })
+
+    vim.lsp.get_buffers_by_client_id = function(client_id)
+      assert.are.equal(101, client_id)
+      return { rust_buf, other_rust_buf, lua_buf }
+    end
+
+    local refreshed = {}
+    vim.lsp.semantic_tokens = {
+      force_refresh = function(bufnr)
+        table.insert(refreshed, bufnr)
+      end,
+    }
+
+    local ok, err = lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    table.sort(refreshed)
+    assert.are.same(util.unique_sorted({ rust_buf, other_rust_buf }), refreshed)
+  end)
+
+  it("apply does not refresh unrelated buffers", function()
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    local unrelated = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = unrelated })
+
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+
+    local refreshed = {}
+    vim.lsp.semantic_tokens = {
+      force_refresh = function(bufnr)
+        table.insert(refreshed, bufnr)
+      end,
+    }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+    }))
+
+    assert.are.same({ rust_buf }, refreshed)
+  end)
+
+  it("apply failure does not refresh buffers", function()
+    clients = {}
+    local refreshed = false
+    vim.lsp.semantic_tokens = {
+      force_refresh = function()
+        refreshed = true
+      end,
+    }
+
+    local ok = lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_false(ok)
+    assert.is_false(refreshed)
+  end)
+
+  it("skips semantic refresh when refresh_after_apply is disabled", function()
+    config.setup({
+      lsp = {
+        refresh_after_apply = false,
+      },
+    })
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+    local refreshed = false
+    vim.lsp.semantic_tokens = {
+      force_refresh = function()
+        refreshed = true
+      end,
+    }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+    }))
+
+    assert.is_false(refreshed)
+  end)
+
+  it("treats missing semantic force_refresh as a safe no-op", function()
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+
+    vim.lsp.semantic_tokens = {
+      start = function() end,
+    }
+
+    local ok, err = lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "serde" }, client.settings["rust-analyzer"].cargo.features)
+  end)
+
+  it("reset success refreshes affected Rust buffers", function()
+    local client = make_client(simple_root)
+    client.id = 101
+    clients = { client }
+
+    local rust_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("filetype", "rust", { buf = rust_buf })
+    vim.lsp.get_buffers_by_client_id = function()
+      return { rust_buf }
+    end
+    local refreshed = {}
+    vim.lsp.semantic_tokens = {
+      force_refresh = function(bufnr)
+        table.insert(refreshed, bufnr)
+      end,
+    }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      scope = "package",
+      remember = true,
+    }))
+    refreshed = {}
+
+    local ok, err = lsp.reset({
+      manifest_path = manifest,
+      scope = "package",
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ rust_buf }, refreshed)
   end)
 
   it("reapplies remembered selections to a new rust-analyzer client", function()

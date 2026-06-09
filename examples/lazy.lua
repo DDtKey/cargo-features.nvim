@@ -1,7 +1,8 @@
 return {
   "ddtkey/cargo-features.nvim",
+  version = "*",
   ft = "rust",
-  cmd = "CargoFeatures",
+  cmd = { "CargoFeatures", "CargoFeaturesReset", "CargoFeaturesDebug" },
   keys = {
     {
       "<leader>rf",

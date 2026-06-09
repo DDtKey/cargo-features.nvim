@@ -134,6 +134,7 @@ local function help_lines(width)
     { key_label(keymaps.toggle), "Toggle" },
     { key_label(keymaps.toggle_all), "All" },
     { key_label(keymaps.apply), "Apply" },
+    { key_label(keymaps.reset), "Reset" },
     { key_label(keymaps.close), "Close" },
   }
 
@@ -364,6 +365,24 @@ local function apply(view)
   close(view)
 end
 
+---@param view CargoFeaturesView
+local function reset(view)
+  local ok, err = lsp.reset({
+    bufnr = view.source_bufnr,
+    manifest_path = view.manifest.manifest_path,
+    workspace_root = view.manifest.workspace_root,
+    package_name = view.manifest.package_name,
+    scope = view.manifest.scope,
+  })
+  if not ok then
+    util.notify(err or "Unable to reset Cargo feature overrides", vim.log.levels.ERROR)
+    return
+  end
+
+  util.notify("Reset Cargo feature overrides for rust-analyzer")
+  close(view)
+end
+
 ---@param bufnr integer
 ---@param manifest CargoFeaturesManifest
 ---@return CargoFeaturesView
@@ -449,6 +468,9 @@ local function attach_keymaps(view)
   map(keymaps.apply, function()
     apply(view)
   end, view.bufnr)
+  map(keymaps.reset, function()
+    reset(view)
+  end, view.bufnr)
   map(keymaps.close, function()
     close(view)
   end, view.bufnr)
@@ -496,5 +518,6 @@ function M.open(opts)
 end
 
 M._help_lines = help_lines
+M._reset = reset
 
 return M

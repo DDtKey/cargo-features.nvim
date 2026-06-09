@@ -39,9 +39,9 @@ or experimental pre-release changes.
 ```lua
 {
   "ddtkey/cargo-features.nvim",
-  version = "v0.1.0",
+  version = "*",
   ft = "rust",
-  cmd = "CargoFeatures",
+  cmd = { "CargoFeatures", "CargoFeaturesReset", "CargoFeaturesDebug" },
   keys = {
     {
       "<leader>rf",
@@ -75,6 +75,16 @@ If the plugin cannot find the expected LSP client, run:
 :CargoFeaturesDebug
 ```
 
+Remove plugin-applied overrides and return to the rust-analyzer/Cargo defaults:
+
+```vim
+:CargoFeaturesReset
+```
+
+`CargoFeaturesReset!` is available when you explicitly want to clear matching
+live Cargo feature settings even if the plugin has no in-memory ownership record
+for them.
+
 Default keys:
 
 | Key | Action |
@@ -82,7 +92,18 @@ Default keys:
 | `<CR>` / `<Space>` | Toggle feature |
 | `A` | Toggle all |
 | `W` | Apply |
+| `R` | Reset plugin-applied override |
 | `q` / `<Esc>` | Close |
+
+Lua helpers:
+
+```lua
+require("cargo-features").reset(opts)
+```
+
+`reset()` resolves the current buffer by default. Pass `force = true` to clear
+matching live Cargo feature settings even without a remembered plugin-applied
+override.
 
 Experimental profile helpers are public for pre-1.0 feedback:
 
@@ -115,6 +136,7 @@ require("cargo-features").setup({
   lsp = {
     notify = true,
     reapply_policy = "if_empty", -- "never" | "if_empty" | "always"
+    refresh_after_apply = true,
     sync_check_features = "if_set", -- "never" | "if_set" | "always"
     use_all_features_token = false,
   },
@@ -140,6 +162,7 @@ require("cargo-features").setup({
       toggle = { "<CR>", " " },
       toggle_all = "A",
       apply = "W",
+      reset = "R",
       close = { "q", "<Esc>" },
     },
   },
@@ -154,6 +177,16 @@ require("cargo-features").setup({
 - Applying features updates `rust-analyzer.cargo.features` and
   `rust-analyzer.cargo.noDefaultFeatures`, then sends
   `workspace/didChangeConfiguration`.
+- Unchecking every feature applies an explicit empty feature set. Reset is
+  different: it removes the plugin-applied override and lets rust-analyzer use
+  Cargo.toml/default Cargo behavior again.
+- After apply/reset, `lsp.refresh_after_apply = true` requests a semantic-token
+  refresh when supported by Neovim. This is best-effort and scoped to currently
+  loaded Rust buffers attached to the updated rust-analyzer clients. It does not
+  reload buffers, open unloaded buffers, or restart rust-analyzer.
+- `:CargoFeaturesReset` clears plugin-applied live overrides remembered in the
+  current Neovim session and does not delete disk profiles. `:CargoFeaturesReset!`
+  can clear matching live Cargo feature settings without an ownership record.
 - Selections applied from the UI are remembered in memory and reapplied to
   matching rust-analyzer clients that attach later in the same Neovim session.
 - Live rust-analyzer settings are treated as the source of truth while a client
@@ -169,7 +202,9 @@ require("cargo-features").setup({
   `remember = true` when they want the same restart resilience.
 - When applying from a Rust buffer, an attached rust-analyzer client is used
   even if its root metadata is missing or unusual.
-- `rust-analyzer.check.features` is only updated when configured to do so.
+- `rust-analyzer.check.features` is only updated when configured to do so. Reset
+  restores check settings the plugin changed; forced reset clears check settings
+  only when `lsp.sync_check_features = "always"`.
 - Workspace member features are sent as `package/feature` when needed.
 - Virtual workspace default features are not shown as normal checkboxes because
   `cargo.noDefaultFeatures` is workspace-global.
