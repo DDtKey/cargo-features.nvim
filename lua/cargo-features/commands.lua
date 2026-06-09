@@ -136,7 +136,10 @@ function M.create()
     if ok then
       require("cargo-features.util").notify("Reset Cargo feature overrides for rust-analyzer")
     else
-      require("cargo-features.util").notify(err or "Unable to reset Cargo feature overrides", vim.log.levels.ERROR)
+      require("cargo-features.util").notify(
+        err or "Unable to reset Cargo feature overrides",
+        vim.log.levels.ERROR
+      )
     end
   end, {
     bang = true,

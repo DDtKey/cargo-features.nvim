@@ -72,7 +72,8 @@ function M.apply_profile(name, opts)
     return false, err
   end
 
-  local profile_name = type(name) == "string" and name ~= "" and name or config.get().persistence.default_profile
+  local profile_name = type(name) == "string" and name ~= "" and name
+    or config.get().persistence.default_profile
   local profile = require("cargo-features.profile_store").load_profile(profile_name, apply_opts)
   if not profile then
     return false, ("Profile not found: %s"):format(profile_name)

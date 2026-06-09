@@ -93,7 +93,10 @@ function M.setup(opts)
     reapply = M.options.lsp.reapply ~= false,
   }
 
-  local persistence_opts = type(opts) == "table" and type(opts.persistence) == "table" and opts.persistence or {}
+  local persistence_opts = type(opts) == "table"
+      and type(opts.persistence) == "table"
+      and opts.persistence
+    or {}
   if persistence_opts.auto_save ~= nil and persistence_opts.save_on_apply == nil then
     M.options.persistence.save_on_apply = persistence_opts.auto_save == true
   end

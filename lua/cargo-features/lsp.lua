@@ -56,7 +56,8 @@ end
 local function path_is_inside(path, root)
   local normalized_path = util.abspath(path)
   local normalized_root = util.abspath(root):gsub("[/\\]$", "")
-  return normalized_path == normalized_root or normalized_path:sub(1, #normalized_root + 1) == normalized_root .. "/"
+  return normalized_path == normalized_root
+    or normalized_path:sub(1, #normalized_root + 1) == normalized_root .. "/"
 end
 
 ---@param client vim.lsp.Client
@@ -237,8 +238,14 @@ function M.debug_clients(opts)
     table.insert(lines, ("  name: %s"):format(client.name or "(nil)"))
     table.insert(lines, ("  attached: %s"):format(attached[client.id or client] and "yes" or "no"))
     table.insert(lines, ("  root_dir: %s"):format(client.root_dir or "(nil)"))
-    table.insert(lines, ("  config.root_dir: %s"):format(client.config and client.config.root_dir or "(nil)"))
-    table.insert(lines, ("  workspace_folders: %s"):format(#roots > 0 and table.concat(roots, ", ") or "(none)"))
+    table.insert(
+      lines,
+      ("  config.root_dir: %s"):format(client.config and client.config.root_dir or "(nil)")
+    )
+    table.insert(
+      lines,
+      ("  workspace_folders: %s"):format(#roots > 0 and table.concat(roots, ", ") or "(none)")
+    )
     table.insert(lines, ("  covers manifest: %s"):format(covers and "yes" or "no"))
   end
 
@@ -433,11 +440,12 @@ function M.apply(selected, opts)
     allow_global = opts.allow_global,
   })
   if #clients == 0 then
-    return false, M.no_client_error({
-      bufnr = opts.bufnr,
-      manifest_path = opts.manifest_path,
-      allow_global = opts.allow_global,
-    })
+    return false,
+      M.no_client_error({
+        bufnr = opts.bufnr,
+        manifest_path = opts.manifest_path,
+        allow_global = opts.allow_global,
+      })
   end
 
   if opts.remember == true and opts.manifest_path then
@@ -458,7 +466,8 @@ function M.apply(selected, opts)
     local effective_opts = opts
     if opts.manifest_path then
       local merged_with_remembered
-      effective_selected, merged_with_remembered = merged_features_for_client(client, selected, opts)
+      effective_selected, merged_with_remembered =
+        merged_features_for_client(client, selected, opts)
       if merged_with_remembered then
         effective_opts = vim.tbl_extend("force", opts, {
           all_enabled = false,
@@ -484,11 +493,12 @@ function M.reset(opts)
     allow_global = opts.allow_global,
   })
   if #clients == 0 then
-    return false, M.no_client_error({
-      bufnr = opts.bufnr,
-      manifest_path = opts.manifest_path,
-      allow_global = opts.allow_global,
-    })
+    return false,
+      M.no_client_error({
+        bufnr = opts.bufnr,
+        manifest_path = opts.manifest_path,
+        allow_global = opts.allow_global,
+      })
   end
 
   local any_reset = false
@@ -673,14 +683,20 @@ end
 local function profile_contexts_for_attach(base)
   local contexts = {}
   if base.manifest_path and base.manifest_path ~= "" then
-    table.insert(contexts, vim.tbl_extend("force", base, {
-      scope = "package",
-    }))
+    table.insert(
+      contexts,
+      vim.tbl_extend("force", base, {
+        scope = "package",
+      })
+    )
   end
   if base.workspace_root and base.workspace_root ~= "" then
-    table.insert(contexts, vim.tbl_extend("force", base, {
-      scope = "workspace",
-    }))
+    table.insert(
+      contexts,
+      vim.tbl_extend("force", base, {
+        scope = "workspace",
+      })
+    )
   end
   return contexts
 end

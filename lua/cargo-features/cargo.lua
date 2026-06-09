@@ -140,7 +140,8 @@ function M.parse_toml(manifest_path)
     package_name = package_name,
     scope = package_name and "package" or "workspace",
     source = "toml",
-  }, nil
+  },
+    nil
 end
 
 ---@param manifest_path string
@@ -250,7 +251,8 @@ local function metadata_from_result(manifest_path, result)
     scope = scope,
     source = "cargo metadata",
     workspace_root = workspace_root,
-  }, nil
+  },
+    nil
 end
 
 ---@param manifest_path string
@@ -260,11 +262,13 @@ function M.metadata(manifest_path)
     return nil, "cargo executable not found"
   end
 
-  local result = vim.system(metadata_cmd(manifest_path), {
-    cwd = config.get().cargo.metadata_cwd,
-    env = config.get().cargo.metadata_env,
-    text = true,
-  }):wait(config.get().cargo.metadata_timeout)
+  local result = vim
+    .system(metadata_cmd(manifest_path), {
+      cwd = config.get().cargo.metadata_cwd,
+      env = config.get().cargo.metadata_env,
+      text = true,
+    })
+    :wait(config.get().cargo.metadata_timeout)
 
   if not result then
     return nil, "cargo metadata timed out"

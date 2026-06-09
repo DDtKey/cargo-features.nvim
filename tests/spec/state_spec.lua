@@ -108,10 +108,13 @@ describe("profile persistence", function()
       manifest_path = manifest,
     }))
 
-    assert.are.same({ "debug", "release" }, api.list_profiles({
-      manifest_path = manifest,
-      scope = "package",
-    }))
+    assert.are.same(
+      { "debug", "release" },
+      api.list_profiles({
+        manifest_path = manifest,
+        scope = "package",
+      })
+    )
 
     local profile = api.load_profile("debug", {
       manifest_path = manifest,
@@ -125,10 +128,13 @@ describe("profile persistence", function()
       manifest_path = manifest,
       scope = "package",
     }))
-    assert.are.same({ "release" }, api.list_profiles({
-      manifest_path = manifest,
-      scope = "package",
-    }))
+    assert.are.same(
+      { "release" },
+      api.list_profiles({
+        manifest_path = manifest,
+        scope = "package",
+      })
+    )
   end)
 
   it("loads a saved profile from disk after resetting memory", function()
@@ -453,36 +459,45 @@ describe("profile persistence", function()
     assert.are.equal("debug", called_name)
     assert.are.equal("package", called_opts.scope)
     assert.are.equal(manifest, called_opts.manifest_path)
-    assert.matches("Applied Cargo feature profile: debug %(package%)", notifications[#notifications].message)
+    assert.matches(
+      "Applied Cargo feature profile: debug %(package%)",
+      notifications[#notifications].message
+    )
   end)
 
-  it("CargoFeaturesApplyProfile applies a workspace profile when no package profile exists", function()
-    stub_command_context()
-    assert.is_true(api.save_profile("debug", {
-      features = { "a/foo" },
-      scope = "workspace",
-      manifest_path = vim.fs.joinpath(workspace_root, "Cargo.toml"),
-      workspace_root = workspace_root,
-    }))
+  it(
+    "CargoFeaturesApplyProfile applies a workspace profile when no package profile exists",
+    function()
+      stub_command_context()
+      assert.is_true(api.save_profile("debug", {
+        features = { "a/foo" },
+        scope = "workspace",
+        manifest_path = vim.fs.joinpath(workspace_root, "Cargo.toml"),
+        workspace_root = workspace_root,
+      }))
 
-    local called_name
-    local called_opts
-    local original_apply_profile = api.apply_profile
-    api.apply_profile = function(name, opts)
-      called_name = name
-      called_opts = opts
-      return true, nil
+      local called_name
+      local called_opts
+      local original_apply_profile = api.apply_profile
+      api.apply_profile = function(name, opts)
+        called_name = name
+        called_opts = opts
+        return true, nil
+      end
+
+      commands.create()
+      vim.cmd("CargoFeaturesApplyProfile debug")
+
+      api.apply_profile = original_apply_profile
+      assert.are.equal("debug", called_name)
+      assert.are.equal("workspace", called_opts.scope)
+      assert.are.equal(workspace_root, called_opts.workspace_root)
+      assert.matches(
+        "Applied Cargo feature profile: debug %(workspace%)",
+        notifications[#notifications].message
+      )
     end
-
-    commands.create()
-    vim.cmd("CargoFeaturesApplyProfile debug")
-
-    api.apply_profile = original_apply_profile
-    assert.are.equal("debug", called_name)
-    assert.are.equal("workspace", called_opts.scope)
-    assert.are.equal(workspace_root, called_opts.workspace_root)
-    assert.matches("Applied Cargo feature profile: debug %(workspace%)", notifications[#notifications].message)
-  end)
+  )
 
   it("CargoFeaturesApplyProfile prefers package profile when duplicate names exist", function()
     stub_command_context()
@@ -558,7 +573,10 @@ describe("profile persistence", function()
     assert.are.equal("Cargo feature profile", selected_prompt)
     assert.are.equal("release", called_name)
     assert.are.equal("workspace", called_opts.scope)
-    assert.matches("Applied Cargo feature profile: release %(workspace%)", notifications[#notifications].message)
+    assert.matches(
+      "Applied Cargo feature profile: release %(workspace%)",
+      notifications[#notifications].message
+    )
   end)
 
   it("CargoFeaturesApplyProfile picker can apply a package profile", function()

@@ -385,67 +385,76 @@ describe("floating window UI", function()
     assert.is_false(profile.default_enabled)
   end)
 
-  it("loads the default profile with load_on_open if_no_client only when no client matches", function()
-    stub_manifest()
-    require("cargo-features").setup({
-      persistence = {
-        load_on_open = "if_no_client",
-      },
-    })
-    save_default_profile()
+  it(
+    "loads the default profile with load_on_open if_no_client only when no client matches",
+    function()
+      stub_manifest()
+      require("cargo-features").setup({
+        persistence = {
+          load_on_open = "if_no_client",
+        },
+      })
+      save_default_profile()
 
-    require("cargo-features").open()
+      require("cargo-features").open()
 
-    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 2, false)
-    assert.are.equal("☐ serde", lines[1])
-    assert.are.equal("☑ metrics", lines[2])
-  end)
-
-  it("does not load the default profile with load_on_open if_no_client when a client matches", function()
-    stub_manifest()
-
-    require("cargo-features").setup({
-      persistence = {
-        load_on_open = "if_no_client",
-      },
-    })
-    save_default_profile()
-
-    lsp.get_clients = function()
-      return { {} }
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 2, false)
+      assert.are.equal("☐ serde", lines[1])
+      assert.are.equal("☑ metrics", lines[2])
     end
-    lsp.enabled_features = function()
-      return { serde = true }
+  )
+
+  it(
+    "does not load the default profile with load_on_open if_no_client when a client matches",
+    function()
+      stub_manifest()
+
+      require("cargo-features").setup({
+        persistence = {
+          load_on_open = "if_no_client",
+        },
+      })
+      save_default_profile()
+
+      lsp.get_clients = function()
+        return { {} }
+      end
+      lsp.enabled_features = function()
+        return { serde = true }
+      end
+
+      require("cargo-features").open()
+
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 2, false)
+      assert.are.equal("☑ serde", lines[1])
+      assert.are.equal("☐ metrics", lines[2])
     end
+  )
 
-    require("cargo-features").open()
+  it(
+    "loads the default profile with load_on_open always even when rust-analyzer has state",
+    function()
+      stub_manifest()
 
-    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 2, false)
-    assert.are.equal("☑ serde", lines[1])
-    assert.are.equal("☐ metrics", lines[2])
-  end)
+      require("cargo-features").setup({
+        persistence = {
+          load_on_open = "always",
+        },
+      })
+      save_default_profile()
 
-  it("loads the default profile with load_on_open always even when rust-analyzer has state", function()
-    stub_manifest()
+      lsp.get_clients = function()
+        return { {} }
+      end
+      lsp.enabled_features = function()
+        return { serde = true }
+      end
 
-    require("cargo-features").setup({
-      persistence = {
-        load_on_open = "always",
-      },
-    })
-    save_default_profile()
+      require("cargo-features").open()
 
-    lsp.get_clients = function()
-      return { {} }
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 2, false)
+      assert.are.equal("☐ serde", lines[1])
+      assert.are.equal("☑ metrics", lines[2])
     end
-    lsp.enabled_features = function()
-      return { serde = true }
-    end
-
-    require("cargo-features").open()
-
-    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 2, false)
-    assert.are.equal("☐ serde", lines[1])
-    assert.are.equal("☑ metrics", lines[2])
-  end)
+  )
 end)
