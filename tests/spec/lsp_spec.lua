@@ -293,6 +293,27 @@ describe("rust-analyzer LSP integration", function()
     assert.is_true(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
   end)
 
+  it("sets noDefaultFeatures from the Default features toggle state", function()
+    local client = make_client(simple_root)
+    clients = { client }
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      has_default = true,
+      default_enabled = true,
+      scope = "package",
+    }))
+    assert.is_false(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
+
+    assert.is_true(lsp.apply({ "serde" }, {
+      manifest_path = manifest,
+      has_default = true,
+      default_enabled = false,
+      scope = "package",
+    }))
+    assert.is_true(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
+  end)
+
   it("applies to a client named rust-analyzer", function()
     local client = make_client(simple_root, { name = "rust-analyzer" })
     clients = { client }
@@ -1846,7 +1867,7 @@ describe("rust-analyzer LSP integration", function()
     assert.are.same({ "a/foo", "b/bar" }, client.settings["rust-analyzer"].cargo.features)
   end)
 
-  it("does not set noDefaultFeatures for workspace member applies", function()
+  it("does not set noDefaultFeatures when default state is not managed", function()
     local client = make_client(workspace_root)
     clients = { client }
 
@@ -1860,6 +1881,25 @@ describe("rust-analyzer LSP integration", function()
 
     assert.is_true(ok, err)
     assert.is_nil(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
+  end)
+
+  it("sets workspace-global noDefaultFeatures for member applies with managed defaults", function()
+    local client = make_client(workspace_root)
+    clients = { client }
+
+    local ok, err = lsp.apply({ "a/foo" }, {
+      manifest_path = vim.fs.joinpath(workspace_root, "crates", "a", "Cargo.toml"),
+      workspace_root = workspace_root,
+      package_name = "a",
+      scope = "package",
+      has_default = true,
+      default_enabled = false,
+      remember = true,
+    })
+
+    assert.is_true(ok, err)
+    assert.are.same({ "a/foo" }, client.settings["rust-analyzer"].cargo.features)
+    assert.is_true(client.settings["rust-analyzer"].cargo.noDefaultFeatures)
   end)
 
   it("resolves conflicting remembered default states by keeping defaults enabled", function()

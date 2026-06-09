@@ -8,8 +8,11 @@ describe("cargo feature parsing", function()
       return feature.name
     end, parsed.features)
 
-    assert.are.same({ "default", "metrics", "quoted-feature", "serde", "tokio" }, names)
+    assert.are.same({ "metrics", "quoted-feature", "serde", "tokio" }, names)
     assert.equals("simple", parsed.package_name)
+    assert.equals("standalone", parsed.context)
+    assert.is_true(parsed.default_features_supported)
+    assert.is_true(parsed.features[3].default_included)
   end)
 
   it("loads feature metadata with cargo metadata", function()
@@ -17,6 +20,12 @@ describe("cargo feature parsing", function()
 
     assert.equals("simple", metadata.package_name)
     assert.equals("package", metadata.scope)
-    assert.equals(5, #metadata.features)
+    assert.equals("standalone", metadata.context)
+    assert.equals(4, #metadata.features)
+    assert.is_true(metadata.default_features_supported)
+    local serde = vim.tbl_filter(function(feature)
+      return feature.name == "serde"
+    end, metadata.features)[1]
+    assert.is_true(serde.default_included)
   end)
 end)

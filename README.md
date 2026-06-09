@@ -43,12 +43,6 @@ or experimental pre-release changes.
   "ddtkey/cargo-features.nvim",
   version = "*",
   ft = "rust",
-  cmd = {
-    "CargoFeatures",
-    "CargoFeaturesApplyProfile",
-    "CargoFeaturesReset",
-    "CargoFeaturesDebug",
-  },
   keys = {
     {
       "<leader>rf",
@@ -61,6 +55,9 @@ or experimental pre-release changes.
   opts = {},
 }
 ```
+
+Commands are registered when the plugin loads. Add `cmd` triggers only if you
+want command-based lazy loading before opening a Rust buffer.
 
 To pin the first stable release exactly, use the same spec but replace
 `version` with:
@@ -211,6 +208,14 @@ require("cargo-features").setup({
 - Applying features updates `rust-analyzer.cargo.features` and
   `rust-analyzer.cargo.noDefaultFeatures`, then sends
   `workspace/didChangeConfiguration`.
+- Default features are controlled separately from named feature checkboxes.
+  When shown, `Default features` controls `cargo.noDefaultFeatures`; named
+  feature rows are explicit `cargo.features` selections only.
+- `(default)` means the feature is directly listed in `[features].default`.
+  In standalone package roots, those rows are effectively enabled and frozen
+  while `Default features` is enabled; uncheck `Default features` first if you
+  want to disable or explicitly control them. In workspace/member views, the
+  marker is informational and the rows remain toggleable explicit selections.
 - Unchecking every feature applies an explicit empty feature set. Reset is
   different: it removes the plugin-applied override and lets rust-analyzer use
   Cargo.toml/default Cargo behavior again.
@@ -248,8 +253,10 @@ require("cargo-features").setup({
   user already configured explicit check feature keys, the plugin keeps them in
   sync; otherwise it leaves check settings alone.
 - Workspace member features are sent as `package/feature` when needed.
-- Virtual workspace default features are not shown as normal checkboxes because
-  `cargo.noDefaultFeatures` is workspace-global.
+- In workspace contexts, `Default features` controls the workspace-global
+  `cargo.noDefaultFeatures` setting. Member views display local feature names
+  when possible, but apply package-qualified feature names when rust-analyzer
+  needs them.
 - If remembered default-feature states ever conflict inside one workspace,
   reapply keeps defaults enabled when any remembered entry enables them.
 - Profile storage is available for explicit save/load actions. Profiles are

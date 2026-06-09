@@ -9,6 +9,8 @@ local M = {}
 ---@class CargoFeaturesView
 ---@field bufnr integer
 ---@field default_enabled boolean
+---@field default_features_supported boolean
+---@field default_toggle_line? integer
 ---@field features CargoFeaturesFeature[]
 ---@field line_to_feature table<integer, integer>
 ---@field manifest CargoFeaturesManifest
@@ -164,6 +166,23 @@ local function is_enabled(feature, enabled)
   return enabled["*"] or enabled[feature.apply_name] or enabled[feature.name] or false
 end
 
+---@param view CargoFeaturesView
+---@param feature CargoFeaturesFeature
+---@return boolean
+local function is_frozen_default_feature(view, feature)
+  return view.default_features_supported
+    and view.default_enabled
+    and feature.default_included == true
+    and view.manifest.context == "standalone"
+end
+
+---@param view CargoFeaturesView
+---@param feature CargoFeaturesFeature
+---@return boolean
+local function display_enabled(view, feature)
+  return feature.enabled or is_frozen_default_feature(view, feature)
+end
+
 ---@param manifest CargoFeaturesManifest
 ---@param bufnr integer
 ---@return table<string, boolean>, boolean
@@ -213,15 +232,33 @@ local function render(view)
   local ascii = use_ascii_icons()
   local checked = ascii and opts.ui.icons.ascii_checked or opts.ui.icons.checked
   local unchecked = ascii and opts.ui.icons.ascii_unchecked or opts.ui.icons.unchecked
+  local default_suffix_lines = {}
+
+  if view.default_features_supported then
+    local icon = view.default_enabled and checked or unchecked
+    table.insert(lines, ("%s Default features"):format(icon))
+    view.default_toggle_line = #lines
+    if #view.features > 0 then
+      table.insert(lines, "")
+    end
+  else
+    view.default_toggle_line = nil
+  end
 
   for index, feature in ipairs(view.features) do
-    local enabled = feature.enabled
+    local enabled = display_enabled(view, feature)
     local icon = enabled and checked or unchecked
-    table.insert(lines, ("%s %s"):format(icon, feature.name))
+    local line = ("%s %s"):format(icon, feature.name)
+    if feature.default_included == true then
+      local prefix = line
+      line = ("%s (default)"):format(line)
+      default_suffix_lines[#lines + 1] = #prefix
+    end
+    table.insert(lines, line)
     line_to_feature[#lines] = index
   end
 
-  if #lines == 0 then
+  if #view.features == 0 and not view.default_features_supported then
     table.insert(lines, "No [features] entries found")
   end
 
@@ -237,11 +274,19 @@ local function render(view)
 
   for line, index in pairs(line_to_feature) do
     local feature = view.features[index]
-    local hl = feature.enabled and "CargoFeaturesEnabled" or "CargoFeaturesDisabled"
+    local hl = display_enabled(view, feature) and "CargoFeaturesEnabled" or "CargoFeaturesDisabled"
     vim.api.nvim_buf_set_extmark(view.bufnr, ns, line - 1, 0, {
       end_col = #lines[line],
       hl_eol = true,
       hl_group = hl,
+    })
+  end
+
+  for line, suffix_col in pairs(default_suffix_lines) do
+    vim.api.nvim_buf_set_extmark(view.bufnr, ns, line - 1, suffix_col, {
+      end_col = #lines[line],
+      hl_group = "CargoFeaturesHelp",
+      priority = 10,
     })
   end
 
@@ -252,7 +297,7 @@ local function render(view)
       hl_group = "CargoFeaturesHelp",
     })
   end
-  if #view.features == 0 then
+  if #view.features == 0 and not view.default_features_supported then
     vim.api.nvim_buf_set_extmark(view.bufnr, ns, 0, 0, {
       end_col = #lines[1],
       hl_eol = true,
@@ -280,16 +325,25 @@ end
 ---@param view CargoFeaturesView
 local function toggle_current(view)
   local row = vim.api.nvim_win_get_cursor(view.win)[1]
+  if row == view.default_toggle_line then
+    view.default_enabled = not view.default_enabled
+    render(view)
+    vim.api.nvim_win_set_cursor(view.win, { row, 0 })
+    return
+  end
+
   local index = view.line_to_feature[row]
   if not index then
     return
   end
 
   local feature = view.features[index]
-  feature.enabled = not feature.enabled
-  if feature.is_default then
-    view.default_enabled = feature.enabled
+  if is_frozen_default_feature(view, feature) then
+    util.notify("Disable Default features first", vim.log.levels.INFO)
+    return
   end
+
+  feature.enabled = not feature.enabled
   render(view)
   vim.api.nvim_win_set_cursor(view.win, { row, 0 })
 end
@@ -298,7 +352,7 @@ end
 local function toggle_all(view)
   local all_enabled = #view.features > 0
   for _, feature in ipairs(view.features) do
-    if not feature.enabled then
+    if not is_frozen_default_feature(view, feature) and not feature.enabled then
       all_enabled = false
       break
     end
@@ -306,9 +360,10 @@ local function toggle_all(view)
 
   local next_enabled = not all_enabled
   for _, feature in ipairs(view.features) do
-    feature.enabled = next_enabled
+    if not is_frozen_default_feature(view, feature) then
+      feature.enabled = next_enabled
+    end
   end
-  view.default_enabled = next_enabled
   render(view)
 end
 
@@ -319,21 +374,18 @@ end
 local function selected_features(view)
   local selected = {}
   local all_enabled = #view.features > 0
-  local has_default = false
 
   for _, feature in ipairs(view.features) do
-    if feature.is_default then
-      has_default = true
-    elseif feature.enabled then
+    if feature.enabled and feature.apply_name ~= "default" then
       table.insert(selected, feature.apply_name)
     end
 
-    if not feature.enabled then
+    if not is_frozen_default_feature(view, feature) and not feature.enabled then
       all_enabled = false
     end
   end
 
-  return selected, all_enabled, has_default
+  return selected, all_enabled, view.default_features_supported
 end
 
 ---@param view CargoFeaturesView
@@ -437,14 +489,13 @@ local function create_view(bufnr, manifest)
   local features = vim.deepcopy(manifest.features)
   for _, feature in ipairs(features) do
     feature.enabled = is_enabled(feature, enabled)
-    if feature.is_default then
-      feature.enabled = default_enabled
-    end
   end
 
   return {
     bufnr = float_buf,
     default_enabled = default_enabled,
+    default_features_supported = manifest.default_features_supported == true,
+    default_toggle_line = nil,
     features = features,
     line_to_feature = {},
     manifest = manifest,
@@ -466,6 +517,8 @@ local function create_loading_view(bufnr, manifest_path)
     line_to_feature = {},
     loading = true,
     manifest = {
+      context = "standalone",
+      default_features_supported = false,
       features = {},
       manifest_path = util.abspath(manifest_path),
       scope = "package",

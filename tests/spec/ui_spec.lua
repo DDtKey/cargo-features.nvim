@@ -58,7 +58,8 @@ describe("floating window UI", function()
     pcall(vim.cmd, "silent! %bwipeout!")
   end)
 
-  local function stub_manifest(features)
+  local function stub_manifest(features, manifest_opts)
+    manifest_opts = manifest_opts or {}
     cargo.find_manifest = function()
       return simple_manifest
     end
@@ -69,14 +70,15 @@ describe("floating window UI", function()
           {
             name = "serde",
             apply_name = "serde",
-            is_default = false,
+            default_included = manifest_opts.serde_default == true,
           },
           {
             name = "metrics",
             apply_name = "metrics",
-            is_default = false,
           },
         },
+        context = manifest_opts.context or "standalone",
+        default_features_supported = manifest_opts.default_features_supported == true,
         manifest_path = vim.fs.normalize(manifest_path),
         package_name = "simple",
         scope = "package",
@@ -214,6 +216,317 @@ describe("floating window UI", function()
     local after = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, -1, false)
     assert.are.equal("☐ serde", after[1])
   end)
+
+  it("renders default features as a separate row", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    require("cargo-features").open()
+
+    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 5, false)
+    assert.are.equal("☑ Default features", lines[1])
+    assert.are.equal("", lines[2])
+    assert.are.equal("☑ serde (default)", lines[3])
+    assert.are.equal("☐ metrics", lines[4])
+    assert.is_false(vim.tbl_contains(lines, "☐ default"))
+    assert.is_false(vim.tbl_contains(lines, "☑ default"))
+  end)
+
+  it("does not serialize features included only by Cargo defaults", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    local apply_features
+    local apply_opts
+    lsp.apply = function(features, opts)
+      apply_features = features
+      apply_opts = opts
+      return true
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_feedkeys("W", "x", false)
+
+    assert.are.same({}, apply_features)
+    assert.is_true(apply_opts.default_enabled)
+  end)
+
+  it("keeps the default marker but unfreezes rows when Default features are disabled", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    require("cargo-features").open()
+    vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 1, 0 })
+    vim.api.nvim_feedkeys(" ", "x", false)
+
+    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 4, false)
+    assert.are.equal("☐ Default features", lines[1])
+    assert.are.equal("☐ serde (default)", lines[3])
+  end)
+
+  it("does not toggle a default-provided row while Default features are enabled", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    local notifications = {}
+    vim.notify = function(message, level)
+      table.insert(notifications, { message = message, level = level })
+    end
+    local apply_features
+    lsp.apply = function(features)
+      apply_features = features
+      return true
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 3, 0 })
+    vim.api.nvim_feedkeys(" ", "x", false)
+    vim.api.nvim_feedkeys("W", "x", false)
+
+    assert.are.same({}, apply_features)
+    assert.are.equal("Disable Default features first", notifications[1].message)
+    assert.are.equal(vim.log.levels.INFO, notifications[1].level)
+  end)
+
+  it("lets a default-included feature toggle after Default features are disabled", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    local apply_features
+    local apply_opts
+    lsp.apply = function(features, opts)
+      apply_features = features
+      apply_opts = opts
+      return true
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 1, 0 })
+    vim.api.nvim_feedkeys(" ", "x", false)
+    vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 3, 0 })
+    vim.api.nvim_feedkeys(" ", "x", false)
+    vim.api.nvim_feedkeys("W", "x", false)
+
+    assert.are.same({ "serde" }, apply_features)
+    assert.is_false(apply_opts.default_enabled)
+  end)
+
+  it("highlights the default suffix with the help highlight group", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    require("cargo-features").open()
+
+    local namespace = vim.api.nvim_create_namespace("cargo-features.nvim")
+    local marks = vim.api.nvim_buf_get_extmarks(
+      vim.api.nvim_get_current_buf(),
+      namespace,
+      0,
+      -1,
+      { details = true }
+    )
+    local suffix_mark
+    for _, mark in ipairs(marks) do
+      if mark[2] == 2 and mark[3] == #"☑ serde" then
+        suffix_mark = mark
+      end
+    end
+
+    assert.is_not_nil(suffix_mark)
+    assert.are.equal("CargoFeaturesHelp", suffix_mark[4].hl_group)
+  end)
+
+  it("toggles Default features separately from named features", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    local apply_features
+    local apply_opts
+    lsp.apply = function(features, opts)
+      apply_features = features
+      apply_opts = opts
+      return true
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 1, 0 })
+    vim.api.nvim_feedkeys(" ", "x", false)
+    vim.api.nvim_feedkeys("W", "x", false)
+
+    assert.are.same({}, apply_features)
+    assert.is_true(apply_opts.has_default)
+    assert.is_false(apply_opts.default_enabled)
+  end)
+
+  it("toggles all named features without changing Default features", function()
+    stub_manifest(nil, {
+      default_features_supported = true,
+      serde_default = true,
+    })
+    require("cargo-features").setup()
+
+    require("cargo-features").open()
+    vim.api.nvim_feedkeys("A", "x", false)
+
+    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 5, false)
+    assert.are.equal("☑ Default features", lines[1])
+    assert.are.equal("☑ serde (default)", lines[3])
+    assert.are.equal("☑ metrics", lines[4])
+
+    local apply_features
+    lsp.apply = function(features)
+      apply_features = features
+      return true
+    end
+    vim.api.nvim_feedkeys("W", "x", false)
+    assert.are.same({ "metrics" }, apply_features)
+  end)
+
+  it(
+    "shows local feature names and a global Default features toggle for workspace members",
+    function()
+      stub_manifest({
+        {
+          name = "foo",
+          apply_name = "a/foo",
+          default_included = true,
+        },
+        {
+          name = "bar",
+          apply_name = "a/bar",
+        },
+      }, {
+        context = "member",
+        default_features_supported = true,
+      })
+      require("cargo-features").setup()
+
+      require("cargo-features").open()
+
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 5, false)
+      assert.are.equal("☑ Default features", lines[1])
+      assert.are.equal("☐ foo (default)", lines[3])
+      assert.are.equal("☐ bar", lines[4])
+    end
+  )
+
+  it(
+    "lets workspace member default-marked rows toggle while Default features are enabled",
+    function()
+      stub_manifest({
+        {
+          name = "foo",
+          apply_name = "a/foo",
+          default_included = true,
+        },
+        {
+          name = "bar",
+          apply_name = "a/bar",
+        },
+      }, {
+        context = "member",
+        default_features_supported = true,
+      })
+      require("cargo-features").setup()
+
+      local apply_features
+      local apply_opts
+      lsp.apply = function(features, opts)
+        apply_features = features
+        apply_opts = opts
+        return true
+      end
+
+      require("cargo-features").open()
+      vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 3, 0 })
+      vim.api.nvim_feedkeys(" ", "x", false)
+      vim.api.nvim_feedkeys("W", "x", false)
+
+      assert.are.same({ "a/foo" }, apply_features)
+      assert.is_true(apply_opts.default_enabled)
+    end
+  )
+
+  it("applies workspace member selections with package-qualified feature names", function()
+    stub_manifest({
+      {
+        name = "metrics",
+        apply_name = "a/metrics",
+      },
+    }, {
+      context = "member",
+      default_features_supported = true,
+    })
+    require("cargo-features").setup()
+
+    local apply_features
+    local apply_opts
+    lsp.apply = function(features, opts)
+      apply_features = features
+      apply_opts = opts
+      return true
+    end
+
+    require("cargo-features").open()
+    vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 1, 0 })
+    vim.api.nvim_feedkeys(" ", "x", false)
+    vim.api.nvim_win_set_cursor(vim.api.nvim_get_current_win(), { 3, 0 })
+    vim.api.nvim_feedkeys(" ", "x", false)
+    vim.api.nvim_feedkeys("W", "x", false)
+
+    assert.are.same({ "a/metrics" }, apply_features)
+    assert.is_true(apply_opts.has_default)
+    assert.is_false(apply_opts.default_enabled)
+  end)
+
+  it(
+    "shows package-qualified labels and informational default markers for workspace roots",
+    function()
+      stub_manifest({
+        {
+          name = "a/foo",
+          apply_name = "a/foo",
+          default_included = true,
+        },
+        {
+          name = "b/bar",
+          apply_name = "b/bar",
+        },
+      }, {
+        context = "workspace",
+        default_features_supported = true,
+      })
+      require("cargo-features").setup()
+
+      require("cargo-features").open()
+
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_get_current_buf(), 0, 5, false)
+      assert.are.equal("☑ Default features", lines[1])
+      assert.are.equal("☐ a/foo (default)", lines[3])
+      assert.are.equal("☐ b/bar", lines[4])
+    end
+  )
 
   it("save profile key prompts for a profile name", function()
     stub_manifest()

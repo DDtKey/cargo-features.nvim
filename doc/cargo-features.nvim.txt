@@ -202,6 +202,15 @@ Runtime behavior:
   in the same Neovim session. Lua callers should pass remember = true when they
   want this behavior.
 
+  Default features are controlled separately from named feature checkboxes.
+  When shown, the Default features row controls cargo.noDefaultFeatures. Named
+  feature rows are explicit cargo.features selections only. A (default) suffix
+  means the feature is directly listed in [features].default. In standalone
+  package roots, those rows are effectively enabled and frozen while Default
+  features is enabled; uncheck Default features first if you want to disable or
+  explicitly control them. In workspace/member views, the marker is
+  informational and the rows remain toggleable explicit selections.
+
   Unchecking every feature applies an explicit empty feature set. Reset is
   different: it removes the plugin-applied override and lets rust-analyzer use
   Cargo.toml/default Cargo behavior again.
@@ -246,10 +255,12 @@ Runtime behavior:
   matching is used to choose between clients when possible, and as the fallback
   when no rust-analyzer client is attached to the current buffer.
 
-  cargo.noDefaultFeatures is workspace-global. Package-local default feature
-  toggling is intentionally not modeled for workspace member contexts. If
-  remembered default states ever conflict inside one workspace, reapply keeps
-  defaults enabled when any remembered entry enables them.
+  cargo.noDefaultFeatures is workspace-global. In workspace contexts, the
+  Default features row controls that workspace-global setting. Member views
+  display local feature names when possible, but apply package-qualified
+  feature names when rust-analyzer needs them. If remembered default states ever
+  conflict inside one workspace, reapply keeps defaults enabled when any
+  remembered entry enables them.
 
   After apply/reset, the plugin makes a private best-effort reattach of loaded
   Rust buffers attached to the updated rust-analyzer clients to refresh
@@ -357,9 +368,8 @@ the eager defaults created from plugin/cargo-features.lua.
 LIMITATIONS                                  *cargo-features-limitations*
 
 The current workspace behavior is most precise from a concrete package
-manifest. Virtual workspace roots show package-qualified non-default features,
-but package default features are not displayed as ordinary checkboxes because
-rust-analyzer's cargo.noDefaultFeatures setting is workspace-global.
+manifest. Virtual workspace roots show package-qualified features. Default
+features are controlled as a workspace-global rust-analyzer setting.
 
 When a package manifest belongs to a larger workspace, feature names are sent
 to rust-analyzer as package-qualified strings such as `my_crate/serde`.

@@ -291,9 +291,9 @@ function M.apply(client, selected, opts)
 
   -- `cargo.features` is a set-like workspace option and can be merged across
   -- remembered package selections. `cargo.noDefaultFeatures` is also
-  -- workspace-global, but it is not package-local and cannot be merged per
-  -- member. Workspace member applies therefore avoid modeling package default
-  -- toggles; only explicit workspace/package-default state updates this value.
+  -- workspace-global, not package-local. Member views may intentionally update
+  -- this global default-feature switch when `has_default` is provided; absent
+  -- default state leaves the existing rust-analyzer value untouched.
   if opts.has_default then
     ra.cargo.noDefaultFeatures = opts.default_enabled ~= true
   end
